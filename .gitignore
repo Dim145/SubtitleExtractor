@@ -12,6 +12,7 @@ worker/.venv/
 __pycache__/
 *.pyc
 *.egg-info/
+build/
 worker/models/
 
 # Node / frontend

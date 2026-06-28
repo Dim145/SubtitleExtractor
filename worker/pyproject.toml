@@ -11,16 +11,19 @@ dependencies = [
     "httpx>=0.27",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
-    "scikit-image>=0.22",
     "rapidfuzz>=3.9",
-    "rapidocr-onnxruntime>=1.3",
+    # Unified RapidOCR package (>=2.0) with the RapidOCROutput API; needs an
+    # inference engine — onnxruntime is the default, license-clean one.
+    "rapidocr>=3.0",
+    "onnxruntime>=1.17",
 ]
 
 [project.optional-dependencies]
-# Heavier PaddlePaddle-based backends. Install only if you select them.
-ppocr = ["paddleocr>=2.7", "paddlepaddle>=2.6"]
+# Heavier PaddlePaddle-based backends (PaddleOCR 3.x). Install only if selected.
+# The GPU build (paddlepaddle-gpu) is provided by the NVIDIA worker image instead.
+ppocr = ["paddleocr>=3.7", "paddlepaddle>=3.0"]
 # Apple-Silicon GPU OCR (PaddleOCR-VL on Metal via MLX). macOS arm64 only.
-mlx = ["mlx-vlm>=0.3.11", "pillow>=10"]
+mlx = ["mlx-vlm>=0.6", "pillow>=10"]
 
 [project.scripts]
 subextractor-worker = "subextractor.__main__:main"

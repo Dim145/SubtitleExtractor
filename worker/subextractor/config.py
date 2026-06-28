@@ -162,8 +162,8 @@ def _config_schema(backends: list[str], worker_class: str) -> list[dict]:
     if "paddleocr_vl" in backends:
         schema.append(
             {"key": "paddleocr_vl_model", "label": "PaddleOCR-VL model", "type": "text",
-             "default": "mlx-community/PaddleOCR-VL-1.5-4bit",
-             "help": "MLX model id for the paddleocr_vl backend."},
+             "default": "mlx-community/PaddleOCR-VL-1.5-8bit",
+             "help": "MLX model id for the paddleocr_vl backend. 1.5-8bit balances quality/size; -bf16 is highest fidelity, -4bit the lightest."},
         )
     return schema
 

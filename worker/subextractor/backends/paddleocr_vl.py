@@ -11,6 +11,7 @@ with the optional extra:  pip install -e ".[mlx]"   (Apple Silicon only)
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections import Counter
 
@@ -19,8 +20,29 @@ import numpy as np
 
 from .base import OCRBackend, OCRLine
 
-DEFAULT_MODEL = "mlx-community/PaddleOCR-VL-1.5-4bit"
+DEFAULT_MODEL = "mlx-community/PaddleOCR-VL-1.5-8bit"
 OCR_PROMPT = "OCR:"
+
+
+# The VLM sometimes "describes" an empty/blurry crop instead of returning text
+# (e.g. "The image is too blurry to recognize any text content."). These meta
+# responses are not subtitles — drop them. Matched case-insensitively.
+_META_RE = re.compile(
+    r"too blurry"
+    r"|cannot? (?:recognize|read|identify|extract)"
+    r"|could not (?:recognize|read|identify)"
+    r"|unable to (?:recognize|read|identify|extract)"
+    r"|no (?:readable |legible |discernible |visible |clear |)text"
+    r"|there (?:is|are) no (?:text|words|characters)"
+    r"|does not (?:appear to )?contain(?: any)? text"
+    r"|no text (?:is )?(?:present|visible|detected|found|recognizable)",
+    re.IGNORECASE,
+)
+
+
+def _is_meta_response(text: str) -> bool:
+    """True for VLM 'I see no text / too blurry' descriptions (not OCR output)."""
+    return _META_RE.search(text) is not None
 
 
 def _is_degenerate(text: str) -> bool:
@@ -115,7 +137,7 @@ class PaddleOCRVLBackend(OCRBackend):
 
         text = getattr(result, "text", result)
         text = (text or "").strip()
-        if not text or _is_degenerate(text):
+        if not text or _is_degenerate(text) or _is_meta_response(text):
             return []
         h, w = image.shape[:2]
         # The VLM gives no per-line box/confidence; the crop IS the line region.

@@ -1,11 +1,12 @@
-# NVIDIA GPU worker. Build/run on a Linux host with an NVIDIA GPU and the
-# nvidia-container-toolkit installed. Added to the stack via
-# docker-compose.nvidia.yml.
+# NVIDIA GPU worker. Built on the OFFICIAL PaddlePaddle 3.x GPU image, which
+# already bundles a matching Python (3.10) + CUDA 12.6 + cuDNN + paddlepaddle-gpu.
+# That avoids pulling the CUDA-specific paddle wheel from a flaky mirror, and its
+# pip handles a plain `pip install .` cleanly (no editable / PEP 660 workaround).
 #
-# OCR runs on the GPU through PaddleOCR + paddlepaddle-gpu (the `ppocr` backend).
-# NVIDIA_DRIVER_CAPABILITIES includes "video" so a future ffmpeg NVDEC decode
-# path can use the hardware decoder.
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# OCR runs on the GPU through PaddleOCR 3.x (the `ppocr` backend).
+# Run on a Linux host with an NVIDIA GPU and the nvidia-container-toolkit.
+# Added to the stack via docker-compose.nvidia.yml.
+FROM paddlepaddle/paddle:3.3.0-gpu-cuda12.6-cudnn9.5
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
@@ -14,20 +15,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PPOCR_USE_GPU=1 \
     PIP_NO_CACHE_DIR=1
 
+# ffmpeg + OpenCV runtime libs for decoding / frame extraction.
+# (CUDA + paddlepaddle-gpu are already provided by the base image.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg libgl1 libglib2.0-0 && \
+        ffmpeg libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . /app
 
-# Core worker deps + GPU PaddlePaddle. paddlepaddle-gpu wheels are CUDA-specific;
-# this targets CUDA 12.x. Adjust the index URL to match your CUDA if needed:
-# https://www.paddlepaddle.org.cn/install/quick
-RUN pip3 install --no-cache-dir -e . && \
-    pip3 install --no-cache-dir "paddleocr==2.7.3" && \
-    pip3 install --no-cache-dir paddlepaddle-gpu==2.6.1 \
-        -i https://www.paddlepaddle.org.cn/packages/stable/cu123/ || \
-    echo "NOTE: adjust paddlepaddle-gpu version/index to your CUDA version"
+# Worker package (+ its deps) and PaddleOCR 3.x. Must succeed — no error masking.
+RUN pip install --no-cache-dir . "paddleocr==3.7.0"
 
-ENTRYPOINT ["python3", "-m", "subextractor"]
+ENTRYPOINT ["python", "-m", "subextractor"]
