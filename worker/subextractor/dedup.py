@@ -7,7 +7,9 @@ Recall + precision techniques (per the design research):
     hallucinations on empty frames, saves compute).
   * Post-merge filters — minimum persistence (frames) + duration, and a junk
     filter dropping pure-digit/punctuation flickers.
-  * Majority vote — a cue's text is the most frequent reading across its frames.
+  * Character-level consensus — a cue's text is voted character-by-character
+    across its frames, weighted by OCR confidence, so single-character misreads
+    that no single frame got entirely right are repaired.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
 
 # Pure digits / punctuation up to 3 chars → almost always hallucination junk.
 _JUNK_RE = re.compile(r"^[\W\d_]{1,3}$")
@@ -83,29 +86,98 @@ def alignment_from_bbox(
     return base + col
 
 
+def _normalize(text: str) -> str:
+    """Conservative post-OCR cleanup: trim each line, collapse runs of spaces,
+    drop blank lines. Intentionally does NOT alter characters (no spell-fixing)."""
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _align_to_anchor(anchor: str, t: str) -> list[str]:
+    """For each index of `anchor`, the char of `t` aligned to it ('' if `t`
+    deleted it). Chars `t` inserts beyond `anchor` are dropped so the output
+    stays anchor-shaped (conservative: never invents characters)."""
+    res = [""] * len(anchor)
+    for tag, i1, i2, j1, j2 in Levenshtein.opcodes(anchor, t):
+        if tag == "equal":
+            for off in range(i2 - i1):
+                res[i1 + off] = t[j1 + off]
+        elif tag == "replace":
+            for off in range(i2 - i1):
+                dj = j1 + off
+                res[i1 + off] = t[dj] if dj < j2 else ""
+        # delete: anchor positions absent from t stay "" ; insert: ignored
+    return res
+
+
+def consensus_text(texts: list[str], weights: list[float] | None = None) -> str:
+    """Confidence-weighted character-level consensus across repeated reads of the
+    same subtitle line. Picks the most representative reading as an anchor, then
+    votes per character (weighted by OCR confidence) to repair single-character
+    errors that no single frame got entirely right. Falls back to the reading
+    when frames agree."""
+    texts = [t for t in texts if t]
+    if not texts:
+        return ""
+    if weights is None or len(weights) != len(texts):
+        weights = [1.0] * len(texts)
+    weights = [max(float(w), 1e-6) for w in weights]
+    if len(set(texts)) == 1:
+        return texts[0]
+
+    # Anchor = reading with the highest weighted similarity to all others (medoid).
+    best_i, best_score = 0, -1.0
+    for i, ti in enumerate(texts):
+        score = sum(weights[j] * fuzz.ratio(ti, tj)
+                    for j, tj in enumerate(texts) if j != i)
+        if score > best_score:
+            best_score, best_i = score, i
+    anchor = texts[best_i]
+
+    pos_votes: list[dict[str, float]] = [dict() for _ in range(len(anchor))]
+    for t, w in zip(texts, weights):
+        for k, ch in enumerate(_align_to_anchor(anchor, t)):
+            pos_votes[k][ch] = pos_votes[k].get(ch, 0.0) + w
+
+    out: list[str] = []
+    for k, votes in enumerate(pos_votes):
+        if not votes:
+            out.append(anchor[k])
+            continue
+        # Highest weighted vote; ties prefer the anchor's own character.
+        best_ch = max(votes.items(), key=lambda kv: (kv[1], kv[0] == anchor[k]))[0]
+        out.append(best_ch)
+    return "".join(out)
+
+
 @dataclass
 class _Group:
     start: float
     end: float
     an: int
     texts: list[str] = field(default_factory=list)
+    confs: list[float] = field(default_factory=list)
 
 
 def merge_into_cues(
-    samples: list[tuple[float, str, int]],
+    samples: list[tuple[float, str, int, float]],
     frame_interval: float,
     sim_threshold: float = 80.0,
     min_gap: float = 0.4,
     min_duration: float = 0.4,
     min_frames: int = 2,
     drop_junk: bool = True,
+    char_voting: bool = True,
 ) -> list[Cue]:
-    """Collapse per-frame (timestamp, text, alignment) samples into timed cues,
-    then apply persistence/duration/junk filters and majority-vote the text."""
+    """Collapse per-frame (timestamp, text, alignment, confidence) samples into
+    timed cues, then apply persistence/duration/junk filters and consensus-vote
+    the text. Samples may also be 3-tuples (no confidence) for compatibility."""
     groups: list[_Group] = []
     cur: _Group | None = None
 
-    for ts, text, an in samples:
+    for sample in samples:
+        ts, text, an = sample[0], sample[1], sample[2]
+        conf = float(sample[3]) if len(sample) > 3 else 1.0
         t = text.strip()
         if not t:
             if cur is not None:
@@ -116,10 +188,11 @@ def merge_into_cues(
         if cur is not None and fuzz.ratio(t, cur.texts[-1]) >= sim_threshold:
             cur.end = ts
             cur.texts.append(t)
+            cur.confs.append(conf)
         else:
             if cur is not None:
                 groups.append(cur)
-            cur = _Group(start=ts, end=ts, an=an, texts=[t])
+            cur = _Group(start=ts, end=ts, an=an, texts=[t], confs=[conf])
     if cur is not None:
         groups.append(cur)
 
@@ -127,8 +200,11 @@ def merge_into_cues(
     for g in groups:
         end = g.end + frame_interval
         frames = len(g.texts)
-        # Verification: a cue's text is the most frequent reading across frames.
-        text = Counter(g.texts).most_common(1)[0][0]
+        if char_voting:
+            text = consensus_text(g.texts, g.confs)
+        else:
+            text = Counter(g.texts).most_common(1)[0][0]
+        text = _normalize(text)
         # Persistence + duration + junk filters.
         if frames < min_frames:
             continue

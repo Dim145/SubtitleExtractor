@@ -132,6 +132,13 @@ def _config_schema(backends: list[str], worker_class: str) -> list[dict]:
             "help": "Discard empty / pure-digit-punctuation flickers (e.g. stray '11', '0:0').",
         },
         {
+            "key": "char_voting",
+            "label": "Character-level voting",
+            "type": "boolean",
+            "default": True,
+            "help": "Vote each cue's text character-by-character across its frames, weighted by OCR confidence (repairs single-character misreads). Off = plain majority of whole readings.",
+        },
+        {
             "key": "poll_interval",
             "label": "Poll interval (s)",
             "type": "number",

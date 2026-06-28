@@ -94,6 +94,7 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
     min_frames = int(_pick(params, wcfg, "min_frames", 2))
     min_duration = float(_pick(params, wcfg, "min_subtitle_duration", 0.4))
     drop_junk = bool(_pick(params, wcfg, "drop_junk", True))
+    char_voting = bool(_pick(params, wcfg, "char_voting", True))
 
     with tempfile.TemporaryDirectory(prefix="subext-") as tmp:
         video_path = os.path.join(tmp, job.get("sourceFilename") or "input.bin")
@@ -122,7 +123,7 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
 
         # Per-zone accumulators. Alignment comes from the zone position (stable,
         # independent of OCR boxes / upscaling).
-        samples: list[list[tuple[float, str, int]]] = [[] for _ in zones]
+        samples: list[list[tuple[float, str, int, float]]] = [[] for _ in zones]
         zone_an = [alignment_from_bbox((0, 0, zw, zh), info.width, info.height, zx, zy)
                    for (zx, zy, zw, zh) in zones]
         prev_mask: list[Any] = [None for _ in zones]
@@ -148,7 +149,8 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
 
                 good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
                 text = "\n".join(l.text for l in good if l.text)
-                samples[zi].append((sf.timestamp, text, zone_an[zi]))
+                conf = (sum(l.confidence for l in good) / len(good)) if good else 1.0
+                samples[zi].append((sf.timestamp, text, zone_an[zi], conf))
 
             if i % 15 == 0:
                 pct = 6 + int(min(80, (i / est_total) * 80))
@@ -164,6 +166,7 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
                     min_duration=min_duration,
                     min_frames=min_frames,
                     drop_junk=drop_junk,
+                    char_voting=char_voting,
                 )
             )
         cues.sort(key=lambda c: c.start)
