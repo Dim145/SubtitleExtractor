@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/* Class-based dark mode (toggled on <html> by the theme store). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---- Fusion design tokens (semantic, runtime-swappable) ---- */
+:root {
+  --bg: #f6f7fb; --surface: #ffffff; --surface-2: #f1f3f9; --surface-3: #e7ebf4;
+  --text: #131a2b; --muted: #5a6680; --faint: #8f9ab2;
+  --border: #e3e8f2; --border-strong: #cdd5e6;
+  --accent: #0891b2; --accent-foreground: #ffffff; --amber: #b9791a;
+  --ok: #059669; --warn: #b45309; --err: #dc2626; --info: #2563eb;
+}
+.dark {
+  --bg: #0a0e17; --surface: #111726; --surface-2: #182032; --surface-3: #202a40;
+  --text: #e8edf7; --muted: #97a3bb; --faint: #5d6a85;
+  --border: #232c40; --border-strong: #33405b;
+  --accent: #22d3ee; --accent-foreground: #04181c; --amber: #f5b544;
+  --ok: #34d399; --warn: #fbbf24; --err: #f87171; --info: #60a5fa;
+}
+
+/* Map tokens to Tailwind utilities (inline → utilities reference the vars,
+   so light/dark swap at runtime). e.g. bg-surface, text-muted, border-border. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-amber: var(--amber);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-info: var(--info);
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+  --radius: 0.75rem;
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  *:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 4px; }
+  ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+}

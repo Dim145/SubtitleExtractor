@@ -1,7 +1,7 @@
 {
   "name": "subtitleextractor-web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -11,20 +11,36 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.2.5",
+    "@fontsource-variable/geist-mono": "^5.2.5",
+    "@tanstack/react-query": "^5.62.7",
+    "@tanstack/react-router": "^1.95.1",
+    "@tanstack/react-table": "^8.21.2",
+    "@tanstack/react-virtual": "^3.13.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.0.4",
     "jassub": "^1.7.15",
+    "lucide-react": "^0.469.0",
     "onnxruntime-web": "^1.27.0",
     "ppu-paddle-ocr": "^6.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-hook-form": "^7.54.2",
     "react-rnd": "^10.4.13",
-    "react-router-dom": "^6.26.2",
+    "tailwind-merge": "^2.6.0",
     "wavesurfer.js": "^7.8.6",
-    "web-demuxer": "^2.1.5"
+    "web-demuxer": "^2.1.5",
+    "zod": "^3.24.1",
+    "zustand": "^5.0.2",
+    "@hookform/resolvers": "^3.10.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.2",
+    "tailwindcss": "^4.0.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.9"
   }
