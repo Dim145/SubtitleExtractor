@@ -210,9 +210,11 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "expected multipart/form-data")
 		return
 	}
+	// When overwriting, we must resolve the target's storage key before storing,
+	// so buffer the small subtitle body and process fields first.
 	var (
-		storageKey string
-		fields     = map[string]string{}
+		body   []byte
+		fields = map[string]string{}
 	)
 	for {
 		part, err := mr.NextPart()
@@ -224,20 +226,14 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if part.FormName() == "file" {
-			name := sanitizeFilename(part.FileName())
-			storageKey = "results/" + job.ID + "/edited-" + name
-			if err := s.store.Put(r.Context(), storageKey, part, -1, "text/plain; charset=utf-8"); err != nil {
-				part.Close()
-				writeError(w, http.StatusInternalServerError, "failed to store subtitle")
-				return
-			}
+			body, _ = io.ReadAll(io.LimitReader(part, 8<<20)) // subtitles are tiny
 		} else {
 			buf, _ := io.ReadAll(io.LimitReader(part, 1<<16))
 			fields[part.FormName()] = strings.TrimSpace(string(buf))
 		}
 		part.Close()
 	}
-	if storageKey == "" {
+	if len(body) == 0 {
 		writeError(w, http.StatusBadRequest, "missing \"file\" part")
 		return
 	}
@@ -245,16 +241,78 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = "ass"
 	}
-	var size int64 = -1
-	if blob, err := s.store.Stat(r.Context(), storageKey); err == nil {
-		size = blob.Size
+	name := sanitizeFilename(fields["name"])
+	if name == "upload.bin" {
+		name = ""
 	}
-	res, err := s.jobs.AddResult(r.Context(), job.ID, kind, storageKey, fields["language"], size, "")
-	if err != nil {
+
+	// Overwrite an existing result, or create a new one.
+	var overwrite *jobs.Result
+	if rid := fields["resultId"]; rid != "" {
+		ex, err := s.jobs.ResultByID(r.Context(), rid)
+		if err != nil || ex.JobID != job.ID {
+			writeError(w, http.StatusNotFound, "result not found")
+			return
+		}
+		overwrite = ex
+	}
+
+	storageKey := ""
+	if overwrite != nil {
+		storageKey = overwrite.StorageKey
+	} else {
+		base := name
+		if base == "" {
+			base = "edited." + kind
+		}
+		storageKey = "results/" + job.ID + "/" + uuid.NewString() + "-" + base
+	}
+	if err := s.store.Put(r.Context(), storageKey, strings.NewReader(string(body)), int64(len(body)), "text/plain; charset=utf-8"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store subtitle")
+		return
+	}
+	size := int64(len(body))
+
+	var res *jobs.Result
+	var err2 error
+	if overwrite != nil {
+		res, err2 = s.jobs.ReplaceResult(r.Context(), overwrite.ID, kind, name, fields["language"], size, "")
+	} else {
+		res, err2 = s.jobs.AddResult(r.Context(), job.ID, kind, storageKey, fields["language"], name, size, "")
+	}
+	if err2 != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record subtitle")
 		return
 	}
 	writeJSON(w, http.StatusCreated, res)
+}
+
+// handleDeleteResult removes one subtitle result (file + row). If it was the
+// job's last result, the whole job (input + remaining files) is deleted too.
+func (s *Server) handleDeleteResult(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.ownedJob(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.jobs.ResultByID(r.Context(), chi.URLParam(r, "resultId"))
+	if err != nil || res.JobID != job.ID {
+		writeError(w, http.StatusNotFound, "result not found")
+		return
+	}
+	_ = s.store.Delete(r.Context(), res.StorageKey)
+	if err := s.jobs.DeleteResult(r.Context(), res.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete result")
+		return
+	}
+	remaining, _ := s.jobs.Results(r.Context(), job.ID)
+	if len(remaining) == 0 {
+		_ = s.store.Delete(r.Context(), job.InputKey)
+		_ = s.workers.ClearJob(r.Context(), job.ID)
+		_ = s.jobs.Delete(r.Context(), job.ID)
+		writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": false})
 }
 
 // handleWorkerAvailability returns aggregate worker counts (no names/config) so

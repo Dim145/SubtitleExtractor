@@ -50,6 +50,7 @@ export interface JobResult {
   id: string;
   jobId: string;
   kind: string;
+  name: string | null;
   language: string | null;
   byteSize: number | null;
   createdAt: string;

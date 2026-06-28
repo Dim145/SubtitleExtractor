@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Plus, Trash2, Save, Download, Check, X } from "lucide-react";
 import { useJob } from "@/api/jobs";
 import { api } from "@/api/client";
@@ -18,6 +19,11 @@ import { cn } from "@/lib/cn";
 
 type Format = "ass" | "srt" | "vtt";
 
+/** Strip a trailing extension from a filename. */
+function stripExt(name: string): string {
+  return name.replace(/\.[^./\\]+$/, "");
+}
+
 /** Map an ASS \an (1-9 numpad) to overlay positioning. */
 function anClasses(an: number): string {
   const v = an >= 7 ? "items-start" : an >= 4 ? "items-center" : "items-end";
@@ -28,6 +34,14 @@ function anClasses(an: number): string {
 export function Editor() {
   const { id = "" } = useParams({ strict: false });
   const { data: job } = useJob(id);
+  const qc = useQueryClient();
+
+  // The result this editor loaded (so "overwrite" targets the right file).
+  const [sourceResultId, setSourceResultId] = useState<string | null>(null);
+  const [sourceResultName, setSourceResultName] = useState<string>("");
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveMode, setSaveMode] = useState<"overwrite" | "new">("new");
 
   const [cues, setCues] = useState<Cue[]>([]);
   const [dims, setDims] = useState({ width: 1280, height: 720 });
@@ -64,6 +78,9 @@ export function Editor() {
         const text = await fetch(sameOriginApiUrl(pick.downloadUrl), { credentials: "include" }).then((r) => r.text());
         const parsed = parseSubtitles(text, pick.kind);
         if (stop) return;
+        setSourceResultId(pick.id);
+        setSourceResultName(pick.name ?? "");
+        setFormat((pick.kind as Format) ?? "ass");
         setCues(parsed.cues);
         if (parsed.width && parsed.height) setDims({ width: parsed.width, height: parsed.height });
         setSelectedId(parsed.cues[0]?.id ?? null);
@@ -121,10 +138,27 @@ export function Editor() {
   function serialize(): string {
     return format === "ass" ? toASS(cues, dims.width, dims.height) : format === "vtt" ? toVTT(cues) : toSRT(cues);
   }
-  async function save() {
+  function openSave() {
+    const base = stripExt(sourceResultName) || stripExt(job?.sourceFilename ?? "") || "subtitles";
+    setSaveName(base);
+    setSaveMode(sourceResultId ? "overwrite" : "new");
+    setSaveOpen(true);
+  }
+  async function doSave() {
     setSaving(true);
-    try { await api.saveResult(id, serialize(), format, "edited"); setDirty(false); }
-    finally { setSaving(false); }
+    try {
+      const name = `${saveName.trim() || "subtitles"}.${format}`;
+      const res = await api.saveResult(id, serialize(), format, {
+        name,
+        resultId: saveMode === "overwrite" ? sourceResultId ?? undefined : undefined,
+      });
+      setSourceResultId(res.id);
+      setSourceResultName(res.name ?? name);
+      setDirty(false);
+      setSaveOpen(false);
+      qc.invalidateQueries({ queryKey: ["job-results", id] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    } finally { setSaving(false); }
   }
   function exportFile() {
     const blob = new Blob([serialize()], { type: "text/plain;charset=utf-8" });
@@ -184,8 +218,8 @@ export function Editor() {
           </select>
           <div className="ml-auto flex items-center gap-2">
             <Button variant="default" size="sm" onClick={exportFile}><Download className="size-3.5" /> Export</Button>
-            <Button variant="primary" size="sm" onClick={save} disabled={saving || !dirty}>
-              {saving ? <Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> : <Save className="size-3.5" />} Save
+            <Button variant="primary" size="sm" onClick={openSave} disabled={saving || loading || !!error}>
+              <Save className="size-3.5" /> Save…
             </Button>
           </div>
         </div>
@@ -274,6 +308,49 @@ export function Editor() {
         </div>
       </div>
       <p className="mt-2 text-xs text-muted">Cue list, waveform and video stay in sync · Space play/pause · ← → seek 5s · [ / ] set in/out · ↑ ↓ select · edits aren’t saved until you hit Save.</p>
+
+      {saveOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) setSaveOpen(false); }}>
+          <div className="w-full max-w-md rounded-2xl border border-border-strong bg-surface p-5 shadow-2xl">
+            <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Save subtitles</div>
+            <label className="mt-3 block text-sm">
+              <span className="text-muted">File name</span>
+              <div className="mt-1 flex items-center gap-2">
+                <input
+                  autoFocus value={saveName} onChange={(e) => setSaveName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && saveName.trim()) doSave(); }}
+                  className="h-9 flex-1 rounded-lg border border-border-strong bg-surface-2 px-3 text-sm focus:border-accent"
+                />
+                <span className="font-mono text-sm text-faint">.{format}</span>
+              </div>
+            </label>
+
+            <div className="mt-4 grid gap-2">
+              <label className={cn("flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 text-sm", saveMode === "overwrite" ? "border-accent bg-accent/10" : "border-border", !sourceResultId && "cursor-not-allowed opacity-50")}>
+                <input type="radio" className="mt-0.5" name="savemode" disabled={!sourceResultId} checked={saveMode === "overwrite"} onChange={() => setSaveMode("overwrite")} />
+                <span>
+                  <div className="font-medium">Overwrite current file</div>
+                  <div className="text-xs text-muted">Replaces {sourceResultName ? <span className="font-mono">{sourceResultName}</span> : "the file you opened"}.</div>
+                </span>
+              </label>
+              <label className={cn("flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 text-sm", saveMode === "new" ? "border-accent bg-accent/10" : "border-border")}>
+                <input type="radio" className="mt-0.5" name="savemode" checked={saveMode === "new"} onChange={() => setSaveMode("new")} />
+                <span>
+                  <div className="font-medium">Save as new file</div>
+                  <div className="text-xs text-muted">Adds a new subtitle file to this job.</div>
+                </span>
+              </label>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="default" size="sm" onClick={() => setSaveOpen(false)} disabled={saving}>Cancel</Button>
+              <Button variant="primary" size="sm" onClick={doSave} disabled={saving || !saveName.trim()}>
+                {saving ? <Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> : <Save className="size-3.5" />} Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

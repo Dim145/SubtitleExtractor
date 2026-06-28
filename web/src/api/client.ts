@@ -61,13 +61,17 @@ export const api = {
   cancelJob: (id: string) => request<void>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: "DELETE" }),
   createJob: (form: FormData) => request<Job>("/api/jobs", { method: "POST", body: form }),
-  saveResult: (id: string, content: string, kind: string, language?: string) => {
+  saveResult: (id: string, content: string, kind: string, opts: { name?: string; language?: string; resultId?: string } = {}) => {
     const form = new FormData();
-    form.append("file", new Blob([content], { type: "text/plain" }), `subtitles.${kind}`);
+    form.append("file", new Blob([content], { type: "text/plain" }), opts.name || `subtitles.${kind}`);
     form.append("kind", kind);
-    if (language) form.append("language", language);
+    if (opts.name) form.append("name", opts.name);
+    if (opts.language) form.append("language", opts.language);
+    if (opts.resultId) form.append("resultId", opts.resultId);
     return request<JobResult>(`/api/jobs/${id}/results`, { method: "POST", body: form });
   },
+  deleteResult: (jobId: string, resultId: string) =>
+    request<{ jobDeleted: boolean }>(`/api/jobs/${jobId}/results/${resultId}`, { method: "DELETE" }),
   jobEventsUrl: (id: string) => `/api/jobs/${id}/events`,
 
   // ---- admin ----

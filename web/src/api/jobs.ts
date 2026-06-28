@@ -56,3 +56,14 @@ export function useDeleteJob() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }
+
+export function useDeleteResult(jobId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (resultId: string) => api.deleteResult(jobId, resultId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["job-results", jobId] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}

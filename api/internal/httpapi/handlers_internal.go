@@ -218,7 +218,7 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 		size = blob.Size
 	}
 
-	res, err := s.jobs.AddResult(r.Context(), jobID, kind, storageKey, fields["language"], size, fields["sha256"])
+	res, err := s.jobs.AddResult(r.Context(), jobID, kind, storageKey, fields["language"], fields["name"], size, fields["sha256"])
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record result")
 		return

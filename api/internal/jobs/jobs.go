@@ -41,6 +41,7 @@ type Result struct {
 	JobID     string    `json:"jobId"`
 	Kind      string    `json:"kind"`
 	StorageKey string   `json:"-"`
+	Name      *string   `json:"name"`
 	Language  *string   `json:"language"`
 	ByteSize  *int64    `json:"byteSize"`
 	SHA256    *string   `json:"sha256"`
@@ -186,32 +187,67 @@ func (r *Repo) Logs(ctx context.Context, id string, afterID int64, limit int) ([
 	return out, rows.Err()
 }
 
+const resultCols = `id, job_id, kind, storage_key, name, language, byte_size, sha256, created_at`
+
+func scanResult(row interface{ Scan(...any) error }, res *Result) error {
+	return row.Scan(&res.ID, &res.JobID, &res.Kind, &res.StorageKey, &res.Name, &res.Language, &res.ByteSize, &res.SHA256, &res.CreatedAt)
+}
+
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // AddResult records a produced artifact.
-func (r *Repo) AddResult(ctx context.Context, jobID, kind, storageKey, language string, byteSize int64, sha256 string) (*Result, error) {
-	var langPtr, shaPtr *string
-	if language != "" {
-		langPtr = &language
-	}
-	if sha256 != "" {
-		shaPtr = &sha256
-	}
+func (r *Repo) AddResult(ctx context.Context, jobID, kind, storageKey, language, name string, byteSize int64, sha256 string) (*Result, error) {
 	var res Result
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO job_results (job_id, kind, storage_key, language, byte_size, sha256)
-		VALUES ($1,$2,$3,$4,$5,$6)
-		RETURNING id, job_id, kind, storage_key, language, byte_size, sha256, created_at`,
-		jobID, kind, storageKey, langPtr, byteSize, shaPtr).
-		Scan(&res.ID, &res.JobID, &res.Kind, &res.StorageKey, &res.Language, &res.ByteSize, &res.SHA256, &res.CreatedAt)
+	err := scanResult(r.pool.QueryRow(ctx, `
+		INSERT INTO job_results (job_id, kind, storage_key, name, language, byte_size, sha256)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		RETURNING `+resultCols,
+		jobID, kind, storageKey, strPtr(name), strPtr(language), byteSize, strPtr(sha256)), &res)
 	if err != nil {
 		return nil, err
 	}
 	return &res, nil
 }
 
+// ReplaceResult overwrites an existing result's metadata (its storage object is
+// replaced separately by the caller). Used for the editor's "overwrite" save.
+func (r *Repo) ReplaceResult(ctx context.Context, id, kind, name, language string, byteSize int64, sha256 string) (*Result, error) {
+	var res Result
+	err := scanResult(r.pool.QueryRow(ctx, `
+		UPDATE job_results SET kind=$2, name=$3, language=$4, byte_size=$5, sha256=$6
+		WHERE id=$1
+		RETURNING `+resultCols,
+		id, kind, strPtr(name), strPtr(language), byteSize, strPtr(sha256)), &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// ResultByID fetches a single result (for ownership checks + storage key).
+func (r *Repo) ResultByID(ctx context.Context, id string) (*Result, error) {
+	var res Result
+	if err := scanResult(r.pool.QueryRow(ctx, `SELECT `+resultCols+` FROM job_results WHERE id=$1`, id), &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// DeleteResult removes a single result row.
+func (r *Repo) DeleteResult(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM job_results WHERE id=$1`, id)
+	return err
+}
+
 // Results lists a job's artifacts.
 func (r *Repo) Results(ctx context.Context, jobID string) ([]*Result, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, job_id, kind, storage_key, language, byte_size, sha256, created_at FROM job_results WHERE job_id=$1 ORDER BY created_at`, jobID)
+		`SELECT `+resultCols+` FROM job_results WHERE job_id=$1 ORDER BY created_at`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +255,7 @@ func (r *Repo) Results(ctx context.Context, jobID string) ([]*Result, error) {
 	var out []*Result
 	for rows.Next() {
 		var res Result
-		if err := rows.Scan(&res.ID, &res.JobID, &res.Kind, &res.StorageKey, &res.Language, &res.ByteSize, &res.SHA256, &res.CreatedAt); err != nil {
+		if err := scanResult(rows, &res); err != nil {
 			return nil, err
 		}
 		out = append(out, &res)

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
-import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Download, Pencil } from "lucide-react";
-import { useJob, useJobResults } from "@/api/jobs";
+import { Link, useParams, useNavigate } from "@tanstack/react-router";
+import { ArrowLeft, Download, Pencil, Trash2 } from "lucide-react";
+import { useJob, useJobResults, useDeleteResult } from "@/api/jobs";
 import { useJobEvents } from "@/api/useJobEvents";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -14,9 +14,19 @@ const ACTIVE = ["queued", "claimed", "running"];
 
 export function JobDetail() {
   const { id = "" } = useParams({ strict: false });
+  const navigate = useNavigate();
   const { data: job, isLoading } = useJob(id);
   const results = useJobResults(id);
   const logs = useJobEvents(id);
+  const delResult = useDeleteResult(id);
+
+  function removeResult(resultId: string, name: string, isLast: boolean) {
+    const msg = isLast
+      ? `Delete "${name}"? It's the last subtitle file — this deletes the whole job and its video.`
+      : `Delete "${name}"?`;
+    if (!window.confirm(msg)) return;
+    delResult.mutate(resultId, { onSuccess: (r) => { if (r.jobDeleted) navigate({ to: "/" }); } });
+  }
 
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); }, [logs]);
@@ -71,14 +81,23 @@ export function JobDetail() {
           {results.data && results.data.length > 0 ? (
             <div className="grid gap-2">
               {results.data.map((r) => {
-                const name = subtitleFilename(job.sourceFilename, r.kind);
+                const name = r.name || subtitleFilename(job.sourceFilename, r.kind);
                 const base = sameOriginApiUrl(r.downloadUrl);
                 const href = base + (base.includes("?") ? "&" : "?") + "name=" + encodeURIComponent(name);
+                const isLast = results.data!.length === 1;
                 return (
-                  <a key={r.id} href={href} download={name} className="flex items-center justify-between rounded-lg border border-border-strong bg-surface-2 px-3 py-2 text-sm hover:border-accent">
-                    <span className="flex items-center gap-2"><Download className="size-4 text-muted" /> {name}</span>
-                    <span className="font-mono text-xs text-faint">{r.kind.toUpperCase()} · {formatBytes(r.byteSize)}</span>
-                  </a>
+                  <div key={r.id} className="flex items-center gap-1 rounded-lg border border-border-strong bg-surface-2 pr-1 hover:border-accent">
+                    <a href={href} download={name} className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 py-2 text-sm">
+                      <span className="flex min-w-0 items-center gap-2"><Download className="size-4 shrink-0 text-muted" /> <span className="truncate">{name}</span></span>
+                      <span className="shrink-0 font-mono text-xs text-faint">{r.kind.toUpperCase()} · {formatBytes(r.byteSize)}</span>
+                    </a>
+                    <button
+                      type="button" title={isLast ? "Delete (removes the whole job)" : "Delete file"}
+                      disabled={delResult.isPending}
+                      onClick={() => removeResult(r.id, name, isLast)}
+                      className="grid size-7 shrink-0 place-items-center rounded-md text-faint transition hover:bg-err/15 hover:text-err disabled:opacity-50"
+                    ><Trash2 className="size-4" /></button>
+                  </div>
                 );
               })}
               <Link to="/jobs/$id/editor" params={{ id }} className="mt-1">
