@@ -42,6 +42,12 @@ export function Editor() {
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const cueListRef = useRef<HTMLDivElement>(null);
 
+  // MKV / unplayable container → WebCodecs frame preview driven by a scrubber.
+  const [framesMode, setFramesMode] = useState(false);
+  const decRef = useRef<{ frameAt: (t: number) => Promise<ImageBitmap>; width: number; height: number } | null>(null);
+  const framesCanvasRef = useRef<HTMLCanvasElement>(null);
+  const duration = useMemo(() => Math.max(10, cues.reduce((m, c) => Math.max(m, c.end), 0) + 5), [cues]);
+
   // ---- load existing subtitles ----
   useEffect(() => {
     let stop = false;
@@ -70,10 +76,40 @@ export function Editor() {
     setDirty(true);
   }, []);
 
-  const seek = useCallback((t: number) => { if (videoEl) videoEl.currentTime = t; }, [videoEl]);
+  const drawFrame = useCallback((bmp: ImageBitmap) => {
+    const cv = framesCanvasRef.current;
+    if (!cv) return;
+    cv.width = bmp.width; cv.height = bmp.height;
+    cv.getContext("2d")?.drawImage(bmp, 0, 0);
+  }, []);
+
+  const seek = useCallback((t: number) => {
+    if (framesMode) { setCurrentTime(t); decRef.current?.frameAt(t).then(drawFrame).catch(() => {}); return; }
+    if (videoEl) videoEl.currentTime = t;
+  }, [videoEl, framesMode, drawFrame]);
+
+  // On native playback failure, fall back to decoding frames with WebCodecs.
+  useEffect(() => { if (videoError) setFramesMode(true); }, [videoError]);
+  useEffect(() => {
+    if (!framesMode) return;
+    let stop = false;
+    (async () => {
+      try {
+        const { FrameDecoder } = await import("@/editor/decodeFrame");
+        const blob = await fetch(`/api/jobs/${id}/video`, { credentials: "include" }).then((r) => r.blob());
+        const dec = new FrameDecoder();
+        const bmp = await dec.init(new File([blob], "video", { type: blob.type }));
+        if (stop) return;
+        decRef.current = dec;
+        setDims({ width: dec.width || 1280, height: dec.height || 720 });
+        drawFrame(bmp);
+      } catch { /* leave the fallback message */ }
+    })();
+    return () => { stop = true; };
+  }, [framesMode, id, drawFrame]);
 
   const wave = useWaveform({
-    media: videoEl, container: waveEl, cues, selectedId,
+    media: framesMode ? null : videoEl, container: waveEl, cues, selectedId,
     onUpdate,
     onSelect: (cid) => { setSelectedId(cid); const c = cues.find((x) => x.id === cid); if (c) seek(c.start); },
   });
@@ -182,14 +218,7 @@ export function Editor() {
                 onError={() => setVideoError(true)}
                 onLoadedMetadata={(e) => setDims({ width: e.currentTarget.videoWidth || 1280, height: e.currentTarget.videoHeight || 720 })}
               />
-              {videoError && (
-                <div className="absolute inset-0 grid place-items-center bg-surface-2 px-6 text-center">
-                  <div>
-                    <div className="text-sm font-medium">Preview unavailable for this container</div>
-                    <p className="mx-auto mt-1 max-w-xs text-xs text-muted">The browser can’t play this video format (e.g. MKV). Cue text and timing editing still work.</p>
-                  </div>
-                </div>
-              )}
+              {framesMode && <canvas ref={framesCanvasRef} className="absolute inset-0 size-full bg-black object-contain" />}
               {activeCue && (
                 <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
                   <span className="whitespace-pre-wrap rounded bg-black/65 px-3 py-1 text-[clamp(13px,2.4vw,20px)] font-medium text-white shadow">{activeCue.text}</span>
@@ -197,11 +226,20 @@ export function Editor() {
               )}
             </div>
             <div className="p-3">
-              <div ref={setWaveEl} className="rounded-lg border border-border bg-surface-2 p-1" />
-              <div className="mt-2 flex items-center gap-2 text-xs text-faint">
-                <input type="range" min={20} max={220} defaultValue={60} onChange={(e) => wave.zoom(Number(e.target.value))} className="w-32" />
-                <span className="font-mono">zoom</span>
-              </div>
+              {framesMode ? (
+                <div>
+                  <input type="range" min={0} max={duration} step={0.05} value={currentTime} onChange={(e) => seek(Number(e.target.value))} className="w-full accent-amber" />
+                  <div className="mt-1 text-[11px] text-faint">Frame scrubber · audio waveform unavailable for this container</div>
+                </div>
+              ) : (
+                <>
+                  <div ref={setWaveEl} className="rounded-lg border border-border bg-surface-2 p-1" />
+                  <div className="mt-2 flex items-center gap-2 text-xs text-faint">
+                    <input type="range" min={20} max={220} defaultValue={60} onChange={(e) => wave.zoom(Number(e.target.value))} className="w-32" />
+                    <span className="font-mono">zoom</span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 

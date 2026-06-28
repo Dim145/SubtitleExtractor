@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { UploadCloud, Plus, TriangleAlert, ChevronRight, Trash2, X, Pencil, Film } from "lucide-react";
-import { useJobs, useWorkerAvailability, useCreateJob, useCancelJob, useDeleteJob } from "@/api/jobs";
+import { useJobs, useWorkerAvailability, useCancelJob, useDeleteJob } from "@/api/jobs";
 import type { Job } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -9,22 +9,17 @@ import { StatusBadge, ProgressBar } from "@/components/StatusBadge";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
+// Lazy: pulls react-rnd (+ the decoder/OCR on demand) only when opening the modal.
+const ZonePicker = lazy(() => import("@/editor/ZonePicker").then((m) => ({ default: m.ZonePicker })));
+
 const ACTIVE: Job["status"][] = ["queued", "claimed", "running"];
 
 export function Dashboard() {
   const jobs = useJobs();
   const avail = useWorkerAvailability();
-  const create = useCreateJob();
   const fileRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
-
-  function upload(file?: File | null) {
-    if (!file) return;
-    const form = new FormData();
-    form.append("file", file);
-    form.append("formats", "srt,ass,vtt");
-    create.mutate(form);
-  }
+  const [pickerFile, setPickerFile] = useState<File | null>(null);
 
   const showWarn = avail.data && !avail.data.available;
 
@@ -35,9 +30,8 @@ export function Dashboard() {
           <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">Workspace</div>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">Jobs</h1>
         </div>
-        <Button variant="primary" onClick={() => fileRef.current?.click()} disabled={create.isPending}>
-          {create.isPending ? <Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> : <Plus className="size-4" />}
-          New extraction
+        <Button variant="primary" onClick={() => fileRef.current?.click()}>
+          <Plus className="size-4" /> New extraction
         </Button>
       </div>
 
@@ -52,14 +46,14 @@ export function Dashboard() {
       <label
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
-        onDrop={(e) => { e.preventDefault(); setDrag(false); upload(e.dataTransfer.files?.[0]); }}
+        onDrop={(e) => { e.preventDefault(); setDrag(false); setPickerFile(e.dataTransfer.files?.[0] ?? null); }}
         className={cn(
           "mb-6 grid cursor-pointer place-items-center rounded-xl border border-dashed border-border-strong bg-surface px-6 py-9 text-center transition-colors",
           drag && "border-accent bg-accent/5",
         )}
       >
         <input ref={fileRef} type="file" accept="video/*,.mkv,.mp4" className="hidden"
-               onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ""; }} />
+               onChange={(e) => { setPickerFile(e.target.files?.[0] ?? null); e.target.value = ""; }} />
         <span className="mb-3 grid size-11 place-items-center rounded-xl bg-surface-2 text-accent"><UploadCloud className="size-5" /></span>
         <div className="font-medium">Drop a video, or click to browse</div>
         <div className="mt-1 text-sm text-muted">MP4 / MKV · outputs SRT, ASS &amp; VTT</div>
@@ -77,6 +71,12 @@ export function Dashboard() {
           <div className="font-medium">No jobs yet</div>
           <p className="mx-auto mt-1 max-w-sm text-sm text-muted">Upload a video to extract its hardcoded subtitles.</p>
         </div>
+      )}
+
+      {pickerFile && (
+        <Suspense fallback={null}>
+          <ZonePicker file={pickerFile} onClose={() => setPickerFile(null)} />
+        </Suspense>
       )}
     </div>
   );
