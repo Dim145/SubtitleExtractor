@@ -1,33 +1,40 @@
-# NVIDIA GPU worker. Built on the OFFICIAL PaddlePaddle 3.x GPU image, which
-# already bundles a matching Python (3.10) + CUDA 12.6 + cuDNN + paddlepaddle-gpu.
-# That avoids pulling the CUDA-specific paddle wheel from a flaky mirror, and its
-# pip handles a plain `pip install .` cleanly (no editable / PEP 660 workaround).
+# NVIDIA GPU worker — size-optimized.
 #
-# CUDA 12.6 is chosen for broad host-driver compatibility (needs NVIDIA driver
-# ~R535+). Newer cuda13.0 images exist but require driver ~R580+ on the host.
+# Built on python:3.10-slim, NOT a CUDA base image: paddlepaddle-gpu's pip wheel
+# ships its own CUDA userspace libs (the nvidia-*-cu12 packages: cuDNN, cuBLAS,
+# cuFFT, …), so a CUDA base would only DUPLICATE them. The host still provides
+# the NVIDIA driver via the nvidia-container-toolkit.
 #
-# OCR runs on the GPU through PaddleOCR 3.x (the `ppocr` backend).
+# CUDA 12.6 wheels are used (broad host-driver compatibility, ~R535+).
+# Debian 13 (trixie) + Python 3.13 — the newest Python with a paddlepaddle-gpu
+# 3.3.1 wheel (it ships cp38..cp313 only; 3.14 has no wheel yet).
 # Run on a Linux host with an NVIDIA GPU and the nvidia-container-toolkit.
-# Added to the stack via docker-compose.nvidia.yml.
-FROM paddlepaddle/paddle:3.3.1-gpu-cuda12.6-cudnn9.5
+FROM python:3.13-slim-trixie
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    NVIDIA_VISIBLE_DEVICES=all \
+ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     WORKER_CLASS=gpu-nvidia \
     PPOCR_USE_GPU=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# ffmpeg + OpenCV runtime libs for decoding / frame extraction.
-# (CUDA + paddlepaddle-gpu are already provided by the base image.)
+# Runtime libs only: ffmpeg + OpenCV deps + OpenMP (paddle). No build toolchain.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libgl1 libglib2.0-0 && \
+        ffmpeg libgl1 libglib2.0-0 libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY . /app
 
-# Worker package (+ its deps) and PaddleOCR 3.x. Must succeed — no error masking.
-RUN pip install --no-cache-dir . "paddleocr==3.7.0"
+# Heavy, slow-changing deps in their own layer so they stay cached across source
+# edits: paddlepaddle-gpu (CUDA 12.6 wheel from the official index; PyPI kept as
+# the primary index for the rest) + PaddleOCR 3.x. Must succeed (no error masking).
+RUN pip install --no-cache-dir paddlepaddle-gpu==3.3.1 \
+        --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+RUN pip install --no-cache-dir --upgrade pip "paddleocr==3.7.0"
+
+# Then the worker package itself (+ its remaining deps). This is the only layer
+# that rebuilds on a code change; the big paddle/paddleocr layer above is reused.
+COPY . /app
+RUN pip install --no-cache-dir . && rm -rf /root/.cache
 
 ENTRYPOINT ["python", "-m", "subextractor"]
