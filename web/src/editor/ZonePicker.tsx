@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { useNavigate } from "@tanstack/react-router";
 import { X, Plus, Server, Cpu } from "lucide-react";
@@ -8,6 +8,7 @@ import type { Zone } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { subtitleFilename } from "@/lib/format";
+import { loadZones, saveZones } from "@/lib/zonePrefs";
 import { toSRT, toASS, toVTT } from "@/editor/subtitles";
 import { useSourcePlayer } from "@/editor/player/useSourcePlayer";
 import { usePlayerHotkeys } from "@/editor/player/usePlayerHotkeys";
@@ -35,7 +36,9 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   usePlayerHotkeys(player);
   const ready = player.mode === "video" || player.mode === "canvas";
 
-  const [zones, setZones] = useState<Zone[]>([{ x: 0.06, y: 0.7, w: 0.88, h: 0.22 }]);
+  // Zone layout is remembered across extractions (localStorage).
+  const [zones, setZones] = useState<Zone[]>(loadZones);
+  useEffect(() => { saveZones(zones); }, [zones]);
   const [formats, setFormats] = useState<Set<Fmt>>(new Set<Fmt>(["srt", "ass"]));
   const [progress, setProgress] = useState<{ pct: number; stage: string } | null>(null);
 
