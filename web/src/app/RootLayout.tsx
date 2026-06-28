@@ -79,7 +79,9 @@ export function RootLayout() {
       </header>
 
       <main className="min-h-[calc(100%-3.5rem)]">
-        <Outlet />
+        <div key={pathname} className="route-fade">
+          <Outlet />
+        </div>
       </main>
     </div>
   );

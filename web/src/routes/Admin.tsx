@@ -19,7 +19,7 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
 
-const input = "h-9 w-full rounded-lg border border-border-strong bg-surface-2 px-3 text-sm outline-none focus:border-accent";
+const input = "h-9 w-full rounded-lg border border-border-strong bg-surface-2 px-3 text-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/25";
 const eyebrow = "text-[11px] font-bold uppercase tracking-[0.12em] text-faint";
 
 export function Admin() {
@@ -67,10 +67,7 @@ function Workers() {
               <div className="truncate font-medium">{w.name}</div>
               <div className="font-mono text-xs text-faint">{w.workerClass} · {w.status}{w.lastHeartbeat ? ` · seen ${new Date(w.lastHeartbeat).toLocaleTimeString()}` : ""}</div>
             </div>
-            <button onClick={() => patch.mutate({ id: w.id, enabled: !w.enabled })}
-              className={cn("relative h-5 w-9 rounded-full transition-colors", w.enabled ? "bg-accent" : "bg-surface-3")} title={w.enabled ? "Enabled" : "Disabled"}>
-              <span className={cn("absolute top-0.5 size-4 rounded-full bg-white transition-all", w.enabled ? "left-[18px]" : "left-0.5")} />
-            </button>
+            <Switch checked={w.enabled} onCheckedChange={(v) => patch.mutate({ id: w.id, enabled: v })} aria-label={w.enabled ? "Enabled" : "Disabled"} />
             <Button variant="ghost" size="sm" onClick={() => setOpenId(openId === w.id ? null : w.id)}>
               Configure <ChevronDown className={cn("size-3.5 transition-transform", openId === w.id && "rotate-180")} />
             </Button>
