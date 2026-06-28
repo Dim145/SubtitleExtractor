@@ -5,6 +5,17 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# Self-host the PP-OCRv6 small OCR models (used by in-browser extraction) into
+# public/ so Vite copies them into dist/models. Lets browser OCR run offline and
+# cross-origin-isolated (no third-party CDN at runtime). Downloaded here so it's
+# reproducible in CI rather than depending on local files.
+RUN apk add --no-cache curl \
+ && mkdir -p public/models \
+ && MB=https://media.githubusercontent.com/media/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main \
+ && DB=https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main \
+ && curl -fsSL "$MB/detection/ort/PP-OCRv6_small_det.ort"  -o public/models/PP-OCRv6_small_det.ort \
+ && curl -fsSL "$MB/recognition/ort/PP-OCRv6_small_rec.ort" -o public/models/PP-OCRv6_small_rec.ort \
+ && curl -fsSL "$DB/recognition/ppocrv6_dict.txt"           -o public/models/ppocrv6_dict.txt
 RUN npm run build
 
 FROM nginx:1.27-alpine
