@@ -5,10 +5,10 @@
 // VideoToolbox in Safari/Chrome).
 import { WebDemuxer } from "web-demuxer";
 
-// The full ffmpeg loader (supports mkv/hevc/etc. demuxing). Self-host under
-// /public for offline/air-gapped installs; CDN keeps setup zero-config for now.
-const WASM_LOADER =
-  "https://cdn.jsdelivr.net/npm/web-demuxer@2.1.5/dist/wasm-files/ffmpeg.js";
+// The full ffmpeg loader (supports mkv/hevc/etc. demuxing), served SAME-ORIGIN
+// by the web-demuxer-assets Vite plugin (see vite.config.ts). Must not be a CDN
+// URL — that's CORS-blocked and fails offline / behind nginx.
+const WASM_LOADER = "/web-demuxer/ffmpeg.js";
 
 export function webCodecsAvailable(): boolean {
   return typeof window !== "undefined" && "VideoDecoder" in window;

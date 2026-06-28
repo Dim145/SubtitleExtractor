@@ -44,6 +44,7 @@ export function Editor() {
 
   // MKV / unplayable container → WebCodecs frame preview driven by a scrubber.
   const [framesMode, setFramesMode] = useState(false);
+  const [framesError, setFramesError] = useState(false);
   const decRef = useRef<{ frameAt: (t: number) => Promise<ImageBitmap>; width: number; height: number } | null>(null);
   const framesCanvasRef = useRef<HTMLCanvasElement>(null);
   const duration = useMemo(() => Math.max(10, cues.reduce((m, c) => Math.max(m, c.end), 0) + 5), [cues]);
@@ -95,15 +96,16 @@ export function Editor() {
     let stop = false;
     (async () => {
       try {
-        const { FrameDecoder } = await import("@/editor/decodeFrame");
         const blob = await fetch(`/api/jobs/${id}/video`, { credentials: "include" }).then((r) => r.blob());
+        if (blob.type.includes("json") || blob.size < 1024) throw new Error("source video unavailable");
+        const { FrameDecoder } = await import("@/editor/decodeFrame");
         const dec = new FrameDecoder();
         const bmp = await dec.init(new File([blob], "video", { type: blob.type }));
         if (stop) return;
         decRef.current = dec;
         setDims({ width: dec.width || 1280, height: dec.height || 720 });
         drawFrame(bmp);
-      } catch { /* leave the fallback message */ }
+      } catch { if (!stop) setFramesError(true); }
     })();
     return () => { stop = true; };
   }, [framesMode, id, drawFrame]);
@@ -218,7 +220,15 @@ export function Editor() {
                 onError={() => setVideoError(true)}
                 onLoadedMetadata={(e) => setDims({ width: e.currentTarget.videoWidth || 1280, height: e.currentTarget.videoHeight || 720 })}
               />
-              {framesMode && <canvas ref={framesCanvasRef} className="absolute inset-0 size-full bg-black object-contain" />}
+              {framesMode && !framesError && <canvas ref={framesCanvasRef} className="absolute inset-0 size-full bg-black object-contain" />}
+              {framesError && (
+                <div className="absolute inset-0 grid place-items-center bg-surface-2 px-6 text-center">
+                  <div>
+                    <div className="text-sm font-medium">Source video unavailable</div>
+                    <p className="mx-auto mt-1 max-w-xs text-xs text-muted">The original video can’t be previewed (removed, or an unsupported format). Cue text and timing editing still work.</p>
+                  </div>
+                </div>
+              )}
               {activeCue && (
                 <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
                   <span className="whitespace-pre-wrap rounded bg-black/65 px-3 py-1 text-[clamp(13px,2.4vw,20px)] font-medium text-white shadow">{activeCue.text}</span>
