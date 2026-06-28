@@ -1,16 +1,17 @@
-"""Worker entrypoint: heartbeat (register + fetch config), claim jobs, run the
-pipeline, report status. OCR parameters are admin-controlled via the API."""
+"""Worker entrypoint: heartbeat (register + fetch config), claim jobs, run each
+in a disposable child process, report status. The OCR model lives in the child
+(see runner.py), so all RAM + VRAM is reclaimed when the worker goes idle — the
+child is killed after the grace period. This parent process stays small: it does
+NOT import the OCR pipeline (cv2/paddle/onnxruntime live only in the child)."""
 from __future__ import annotations
 
 import logging
 import os
 import time
-import traceback
 
-from . import backends
-from .client import APIClient, JobCanceled
+from .client import APIClient
 from .config import Config
-from .pipeline import process_job
+from .runner import JobRunner
 
 log = logging.getLogger("subextractor")
 
@@ -19,6 +20,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
     client = APIClient(cfg)
+    runner = JobRunner(cfg)
     log.info("worker started: name=%s class=%s api=%s", cfg.worker_name, cfg.worker_class, cfg.api_base_url)
 
     was_disabled = False
@@ -37,6 +39,8 @@ def main() -> None:
                 if not was_disabled:
                     log.info("worker is disabled by admin — idling")
                     was_disabled = True
+                if runner.is_alive():
+                    runner.shutdown()  # free memory while disabled
                 time.sleep(cfg.poll_interval)
                 continue
             if was_disabled:
@@ -63,10 +67,10 @@ def main() -> None:
                 continue
 
             if claimed is None:
-                # Free the model after a grace period of inactivity (frees GPU/VRAM).
-                if grace > 0 and backends.is_loaded() and (time.monotonic() - last_active) > grace:
-                    n = backends.unload_all()
-                    log.info("unloaded %d model(s) after %.0fs idle", n, grace)
+                # Kill the idle OCR child after the grace period → frees RAM + VRAM.
+                if grace > 0 and runner.is_alive() and (time.monotonic() - last_active) > grace:
+                    runner.shutdown()
+                    log.info("freed OCR subprocess after %.0fs idle", grace)
                 time.sleep(poll)
                 continue
 
@@ -75,20 +79,20 @@ def main() -> None:
             job_id = job["id"]
             log.info("claimed job %s (%s)", job_id, job.get("sourceFilename"))
             try:
-                process_job(cfg, client, job, input_url, wcfg, sub_rules)
-                client.complete(job_id, success=True)
-                log.info("job %s succeeded", job_id)
-            except JobCanceled:
-                # The API already set the job to canceled and cleaned its row;
-                # the temp dir was removed on the way out. Don't mark it failed.
-                log.info("job %s canceled — aborted", job_id)
+                status = runner.run_job(job, input_url, wcfg, sub_rules)
+                if status == "canceled":
+                    # The API already marked it canceled and cleaned up; don't fail it.
+                    log.info("job %s canceled — aborted", job_id)
+                else:
+                    client.complete(job_id, success=True)
+                    log.info("job %s succeeded", job_id)
             except Exception as exc:  # noqa: BLE001
-                err = f"{type(exc).__name__}: {exc}"
-                log.error("job %s failed: %s", job_id, err)
-                log.debug(traceback.format_exc())
+                detail = str(exc)
+                first = detail.splitlines()[0] if detail else "error"
+                log.error("job %s failed: %s", job_id, first)
                 try:
-                    client.log(job_id, traceback.format_exc(), level="error")
-                    client.complete(job_id, success=False, error=err)
+                    client.log(job_id, detail, level="error")
+                    client.complete(job_id, success=False, error=first)
                 except Exception:  # noqa: BLE001
                     log.exception("failed to report job failure")
             finally:
@@ -96,6 +100,7 @@ def main() -> None:
     except KeyboardInterrupt:
         log.info("shutting down")
     finally:
+        runner.shutdown()
         client.close()
 
 
