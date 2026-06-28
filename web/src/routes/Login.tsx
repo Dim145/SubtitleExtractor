@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 
 const schema = z.object({
-  email: z.string().email("Enter a valid email"),
+  email: z.email("Enter a valid email"),
   password: z.string().min(1, "Required"),
   displayName: z.string().optional(),
 });
