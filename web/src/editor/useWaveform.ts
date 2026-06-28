@@ -22,6 +22,9 @@ interface Opts {
 export function useWaveform({ media, container, cues, selectedId, onUpdate, onSelect }: Opts) {
   const wsRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<ReturnType<typeof RegionsPlugin.create> | null>(null);
+  // True while a region is being dragged/resized, so the cue-sync effect doesn't
+  // write back mid-interaction and fight the drag.
+  const draggingRef = useRef(false);
   // Keep latest callbacks/cues without re-creating wavesurfer.
   const cb = useRef({ onUpdate, onSelect });
   cb.current = { onUpdate, onSelect };
@@ -43,7 +46,11 @@ export function useWaveform({ media, container, cues, selectedId, onUpdate, onSe
     wsRef.current = ws;
     regionsRef.current = regions;
 
-    regions.on("region-updated", (r) => cb.current.onUpdate(r.id, r.start, r.end));
+    // `region-update` fires continuously during a drag/resize; `region-updated`
+    // fires once when the interaction finishes. Commit only on the end event so
+    // the cue list updates once, not on every animation frame.
+    regions.on("region-update", () => { draggingRef.current = true; });
+    regions.on("region-updated", (r) => { draggingRef.current = false; cb.current.onUpdate(r.id, r.start, r.end); });
     regions.on("region-clicked", (r, e) => { e.stopPropagation(); cb.current.onSelect(r.id); });
 
     return () => { ws.destroy(); wsRef.current = null; regionsRef.current = null; };
@@ -53,6 +60,9 @@ export function useWaveform({ media, container, cues, selectedId, onUpdate, onSe
   useEffect(() => {
     const regions = regionsRef.current;
     if (!regions) return;
+    // Don't write region geometry back while the user is actively dragging —
+    // it would fight the interaction and cause jitter.
+    if (draggingRef.current) return;
     const existing = new Map(regions.getRegions().map((r) => [r.id, r]));
     const want = new Set(cues.map((c) => c.id));
     for (const [id, r] of existing) if (!want.has(id)) r.remove();

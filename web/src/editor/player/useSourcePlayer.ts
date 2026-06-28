@@ -67,11 +67,15 @@ export function useSourcePlayer(source: { file?: File | null; url?: string | nul
     return () => URL.revokeObjectURL(u);
   }, [file]);
 
-  // Reset when the source changes.
+  // Reset when the source changes — tear down any existing decoder + rAF first
+  // so we don't leak the previous source's WebCodecs decoder.
   useEffect(() => {
     setMode("loading"); setError(null); setPlaying(false);
     setCurrentTime(0); setDuration(0); timeRef.current = 0; playRef.current = false;
     cancelAnimationFrame(rafRef.current);
+    decoderRef.current?.destroy();
+    decoderRef.current = null;
+    framesDurRef.current = 0;
   }, [file, url]);
 
   const draw = useCallback((bmp: ImageBitmap) => {
@@ -93,6 +97,9 @@ export function useSourcePlayer(source: { file?: File | null; url?: string | nul
       }
       if (!srcFile) throw new Error("no source");
       const { FrameDecoder } = await import("@/editor/decodeFrame");
+      // Destroy any decoder left over from a prior source before creating a new one.
+      decoderRef.current?.destroy();
+      decoderRef.current = null;
       const dec = new FrameDecoder();
       const bmp = await dec.init(srcFile);
       decoderRef.current = dec;
@@ -123,7 +130,20 @@ export function useSourcePlayer(source: { file?: File | null; url?: string | nul
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     const onDur = () => setDuration(el.duration || 0);
-    const onErr = () => { if (modeRef.current !== "video") void startFramesBackend(); };
+    const onErr = () => {
+      if (modeRef.current === "video") return;
+      // Only fall back to WebCodecs for genuine decode/format failures — a
+      // transient network error (MEDIA_ERR_NETWORK) shouldn't trip the fallback.
+      const code = el.error?.code;
+      if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED || code === MediaError.MEDIA_ERR_DECODE) {
+        void startFramesBackend();
+      } else if (code == null) {
+        // No error info (some browsers fire a bare error event) — be permissive.
+        void startFramesBackend();
+      } else {
+        setError("This video could not be loaded."); setMode("error");
+      }
+    };
     el.addEventListener("loadedmetadata", onMeta);
     el.addEventListener("timeupdate", onTime);
     el.addEventListener("play", onPlay);
