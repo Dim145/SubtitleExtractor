@@ -1,0 +1,186 @@
+// Package workers is the registry of OCR workers: self-registration via
+// heartbeat (upsert), admin-editable per-worker config (versioned), live status,
+// and current-job tracking.
+package workers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ErrNotFound is returned when no worker matches.
+var ErrNotFound = errors.New("worker not found")
+
+// offlineAfter is how long without a heartbeat before a worker reads as offline
+// (~3x the worker's heartbeat cadence).
+const offlineAfter = 90 * time.Second
+
+// Worker mirrors a row in workers, with a derived live Status.
+type Worker struct {
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	WorkerClass     string          `json:"workerClass"`
+	Enabled         bool            `json:"enabled"`
+	Status          string          `json:"status"` // online | busy | offline (derived)
+	LastHeartbeat   *time.Time      `json:"lastHeartbeat"`
+	CurrentJobID    *string         `json:"currentJobId"`
+	CurrentJobLabel *string         `json:"currentJobLabel"`
+	Capabilities    json.RawMessage `json:"capabilities"`
+	Config          json.RawMessage `json:"config"`
+	ConfigVersion   int             `json:"configVersion"`
+	CreatedAt       time.Time       `json:"createdAt"`
+}
+
+func deriveStatus(lastHB *time.Time, currentJob *string) string {
+	if currentJob != nil {
+		return "busy"
+	}
+	if lastHB != nil && time.Since(*lastHB) < offlineAfter {
+		return "online"
+	}
+	return "offline"
+}
+
+type Repo struct {
+	pool *pgxpool.Pool
+}
+
+func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
+
+const cols = `w.id, w.name, w.worker_class, w.enabled, w.last_heartbeat, w.current_job_id,
+	w.capabilities, w.config, w.config_version, w.created_at`
+
+func scan(row pgx.Row) (*Worker, error) {
+	var w Worker
+	var label *string
+	err := row.Scan(&w.ID, &w.Name, &w.WorkerClass, &w.Enabled, &w.LastHeartbeat, &w.CurrentJobID,
+		&w.Capabilities, &w.Config, &w.ConfigVersion, &w.CreatedAt, &label)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	w.CurrentJobLabel = label
+	w.Status = deriveStatus(w.LastHeartbeat, w.CurrentJobID)
+	return &w, nil
+}
+
+// Upsert registers a worker (or refreshes its heartbeat) by name, without
+// touching admin-owned fields (enabled, config).
+func (r *Repo) Upsert(ctx context.Context, name, class string, caps json.RawMessage) (*Worker, error) {
+	if len(caps) == 0 {
+		caps = json.RawMessage(`{}`)
+	}
+	return scan(r.pool.QueryRow(ctx, `
+		WITH up AS (
+			INSERT INTO workers (name, worker_class, capabilities, last_heartbeat)
+			VALUES ($1, $2, $3, now())
+			ON CONFLICT (name) DO UPDATE
+			SET worker_class = EXCLUDED.worker_class,
+			    capabilities = EXCLUDED.capabilities,
+			    last_heartbeat = now()
+			RETURNING *
+		)
+		SELECT `+cols+`, j.source_filename
+		FROM up w LEFT JOIN jobs j ON j.id = w.current_job_id`,
+		name, class, caps))
+}
+
+// List returns all workers with derived status, newest first.
+func (r *Repo) List(ctx context.Context) ([]*Worker, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+cols+`, j.source_filename
+		FROM workers w LEFT JOIN jobs j ON j.id = w.current_job_id
+		ORDER BY w.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Worker
+	for rows.Next() {
+		w, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// GetByName looks up a worker by its self-reported name.
+func (r *Repo) GetByName(ctx context.Context, name string) (*Worker, error) {
+	return scan(r.pool.QueryRow(ctx, `
+		SELECT `+cols+`, j.source_filename
+		FROM workers w LEFT JOIN jobs j ON j.id = w.current_job_id
+		WHERE w.name = $1`, name))
+}
+
+// SetEnabled toggles whether a worker may claim jobs.
+func (r *Repo) SetEnabled(ctx context.Context, id string, enabled bool) error {
+	_, err := r.pool.Exec(ctx, `UPDATE workers SET enabled=$2 WHERE id=$1`, id, enabled)
+	return err
+}
+
+// UpdateConfig replaces a worker's config and bumps its version.
+func (r *Repo) UpdateConfig(ctx context.Context, id string, config json.RawMessage) error {
+	if len(config) == 0 {
+		config = json.RawMessage(`{}`)
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE workers SET config=$2, config_version=config_version+1 WHERE id=$1`, id, config)
+	return err
+}
+
+// Delete removes a worker registration.
+func (r *Repo) Delete(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM workers WHERE id=$1`, id)
+	return err
+}
+
+// SetCurrentJob records (or clears) the job a worker is processing.
+func (r *Repo) SetCurrentJob(ctx context.Context, name string, jobID *string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE workers SET current_job_id=$2, last_heartbeat=now() WHERE name=$1`, name, jobID)
+	return err
+}
+
+// ClearJob detaches a job from whichever worker holds it (on completion/requeue).
+func (r *Repo) ClearJob(ctx context.Context, jobID string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE workers SET current_job_id=NULL WHERE current_job_id=$1`, jobID)
+	return err
+}
+
+// ClearStaleJobs detaches workers from any job that is no longer running
+// (e.g. after a timed-out job was re-queued), so dead workers stop reading busy.
+func (r *Repo) ClearStaleJobs(ctx context.Context) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE workers SET current_job_id = NULL
+		WHERE current_job_id IS NOT NULL
+		  AND current_job_id NOT IN (SELECT id FROM jobs WHERE status = 'running')`)
+	return err
+}
+
+// EffectiveConfig merges global worker defaults with a worker's own overrides.
+func EffectiveConfig(globalDefaults, workerConfig json.RawMessage) json.RawMessage {
+	merged := map[string]any{}
+	if len(globalDefaults) > 0 {
+		_ = json.Unmarshal(globalDefaults, &merged)
+	}
+	if len(workerConfig) > 0 {
+		override := map[string]any{}
+		if err := json.Unmarshal(workerConfig, &override); err == nil {
+			for k, v := range override {
+				merged[k] = v
+			}
+		}
+	}
+	out, _ := json.Marshal(merged)
+	return out
+}

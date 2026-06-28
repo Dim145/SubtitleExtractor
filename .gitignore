@@ -1,0 +1,36 @@
+# Env / secrets
+.env
+*.local
+
+# Go
+api/bin/
+api/tmp/
+*.test
+
+# Python worker
+worker/.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+worker/models/
+
+# Node / frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Data / storage
+data/
+blobs/
+
+# graphify (knowledge graph output is kept; transient state ignored)
+graphify-out/.graphify_*
+graphify-out/.needs_update
+
+# OS
+.DS_Store
+
+.idea/
+.remember/
+.claude
+graphify-out/

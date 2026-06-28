@@ -1,0 +1,66 @@
+// In-browser frame decoding for the subtitle-area selector. The plain <video>
+// element can't play MKV/HEVC, so for those we decode a frame with WebCodecs
+// (hardware decoder via the OS) fed by the web-demuxer WASM demuxer, and draw it
+// to a canvas. Works for HEVC on platforms whose WebCodecs exposes it (e.g. macOS
+// VideoToolbox in Safari/Chrome).
+import { WebDemuxer } from "web-demuxer";
+
+// The full ffmpeg loader (supports mkv/hevc/etc. demuxing). Self-host under
+// /public for offline/air-gapped installs; CDN keeps setup zero-config for now.
+const WASM_LOADER =
+  "https://cdn.jsdelivr.net/npm/web-demuxer@2.1.5/dist/wasm-files/ffmpeg.js";
+
+export function webCodecsAvailable(): boolean {
+  return typeof window !== "undefined" && "VideoDecoder" in window;
+}
+
+// FrameDecoder lazily demuxes a File and decodes a frame at an arbitrary time.
+export class FrameDecoder {
+  private demuxer: WebDemuxer | null = null;
+  width = 0;
+  height = 0;
+  duration = 0;
+
+  async init(file: File): Promise<ImageBitmap> {
+    const d = new WebDemuxer({ wasmLoaderPath: WASM_LOADER });
+    await d.load(file);
+    this.demuxer = d;
+    try {
+      const info = await d.getMediaInfo();
+      if (info?.duration) this.duration = Number(info.duration);
+    } catch {
+      /* duration optional */
+    }
+    return this.frameAt(this.duration ? Math.min(2, this.duration / 2) : 1);
+  }
+
+  async frameAt(time: number): Promise<ImageBitmap> {
+    const d = this.demuxer;
+    if (!d) throw new Error("decoder not initialized");
+    const config = await d.getVideoDecoderConfig();
+    const chunk = await d.seekEncodedVideoChunk(Math.max(0, time));
+    const frame: VideoFrame = await new Promise((resolve, reject) => {
+      const dec = new VideoDecoder({
+        output: (f) => resolve(f),
+        error: (e) => reject(e),
+      });
+      dec.configure(config);
+      dec.decode(chunk);
+      dec.flush().catch(reject);
+    });
+    this.width = frame.displayWidth;
+    this.height = frame.displayHeight;
+    const bitmap = await createImageBitmap(frame);
+    frame.close();
+    return bitmap;
+  }
+
+  destroy(): void {
+    try {
+      this.demuxer?.destroy();
+    } catch {
+      /* ignore */
+    }
+    this.demuxer = null;
+  }
+}

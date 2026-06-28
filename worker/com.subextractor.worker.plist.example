@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd unit to keep the macOS worker running and auto-restart it.
+  Install:
+    cp com.subextractor.worker.plist.example ~/Library/LaunchAgents/com.subextractor.worker.plist
+    # edit the paths and INTERNAL_API_TOKEN below
+    launchctl load ~/Library/LaunchAgents/com.subextractor.worker.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.subextractor.worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/ABSOLUTE/PATH/TO/SubtitleExtractor/worker/run-macos.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>API_BASE_URL</key>
+    <string>http://localhost:8080</string>
+    <key>INTERNAL_API_TOKEN</key>
+    <string>change-me-internal-worker-token</string>
+    <key>WORKER_CLASS</key>
+    <string>macos</string>
+    <key>OCR_BACKEND</key>
+    <string>rapidocr</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/subextractor-worker.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/subextractor-worker.err.log</string>
+</dict>
+</plist>

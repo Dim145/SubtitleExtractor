@@ -1,0 +1,45 @@
+/* Cutting Room — dark pro-tool design tokens.
+   Backbone: layered OLED-dark surfaces + semantic tokens.
+   Identity: amber playhead/CTA + cyan waveform; video is the hero. */
+:root {
+  /* Surfaces (deep ink, layered) */
+  --bg-0: #0b0e14; /* page canvas */
+  --bg-1: #12161f; /* panels */
+  --bg-2: #1a1f2b; /* raised cards / inputs */
+  --bg-3: #232a38; /* hover / active rows */
+
+  /* Text */
+  --text: #e6eaf2;
+  --text-muted: #8b93a7;
+  --text-faint: #5a6276;
+
+  /* Lines */
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  /* Signature accents */
+  --accent: #f5b544; /* amber — playhead, primary CTA */
+  --accent-ink: #2a1c02; /* text on amber */
+  --accent-2: #34d8c9; /* cyan — waveform, regions, active cue */
+  --accent-2-ink: #042a26;
+
+  /* Semantic / job states */
+  --ok: #3fb950;
+  --warn: #f5b544;
+  --err: #e5534b;
+  --info: #58a6ff;
+
+  /* Typography */
+  --font-display: "Archivo", system-ui, sans-serif;
+  --font-ui: "Geist", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Geometry */
+  --radius: 8px;
+  --radius-sm: 5px;
+  --gap: 16px;
+
+  /* Motion */
+  --dur: 160ms;
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+}

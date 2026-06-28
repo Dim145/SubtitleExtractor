@@ -1,0 +1,33 @@
+# NVIDIA GPU worker. Build/run on a Linux host with an NVIDIA GPU and the
+# nvidia-container-toolkit installed. Added to the stack via
+# docker-compose.nvidia.yml.
+#
+# OCR runs on the GPU through PaddleOCR + paddlepaddle-gpu (the `ppocr` backend).
+# NVIDIA_DRIVER_CAPABILITIES includes "video" so a future ffmpeg NVDEC decode
+# path can use the hardware decoder.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    WORKER_CLASS=gpu-nvidia \
+    PPOCR_USE_GPU=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ffmpeg libgl1 libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . /app
+
+# Core worker deps + GPU PaddlePaddle. paddlepaddle-gpu wheels are CUDA-specific;
+# this targets CUDA 12.x. Adjust the index URL to match your CUDA if needed:
+# https://www.paddlepaddle.org.cn/install/quick
+RUN pip3 install --no-cache-dir -e . && \
+    pip3 install --no-cache-dir "paddleocr==2.7.3" && \
+    pip3 install --no-cache-dir paddlepaddle-gpu==2.6.1 \
+        -i https://www.paddlepaddle.org.cn/packages/stable/cu123/ || \
+    echo "NOTE: adjust paddlepaddle-gpu version/index to your CUDA version"
+
+ENTRYPOINT ["python3", "-m", "subextractor"]
