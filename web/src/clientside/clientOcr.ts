@@ -95,6 +95,9 @@ function isJunk(s: string): boolean {
   const c = s.replace(/\s/g, "");
   if (c.length < 2) return true;
   if (!/[\p{L}\p{N}]/u.test(c)) return true;
+  // Short tokens with no vowel are almost always OCR noise on transition frames
+  // (e.g. "YXK", "Δ"); real subtitle text has vowels.
+  if (c.length <= 3 && !/[aeiouyàâäéèêëïîôöùûüœ0-9]/iu.test(c)) return true;
   return false;
 }
 
@@ -174,47 +177,45 @@ export async function extractInBrowser(
 
   onProgress(6, "decoding");
   const dec = new FrameDecoder();
-  await dec.init(file);
-  const W = dec.width;
-  const H = dec.height;
+  const { duration } = await dec.load(file);
   const fps = opts.fps ?? 2;
   const frameInterval = 1 / fps;
-  const total = Math.max(1, Math.floor((dec.duration || 0) * fps));
+  const total = Math.max(1, Math.floor((duration || 0) * fps));
 
-  const rects = (opts.zones && opts.zones.length ? opts.zones : [{ x: 0, y: 0.62, w: 1, h: 0.38 }]).map(
-    (z) => pxRect(z, W, H),
-  );
-  const samples: Sample[][] = rects.map(() => []);
-
+  const defaultZone: Zone[] = [{ x: 0, y: 0.62, w: 1, h: 0.38 }];
+  let rects: Rect[] = [];
+  let samples: Sample[][] = [];
+  let W = 0, H = 0;
   const work = document.createElement("canvas");
 
-  for (let i = 0; i < total; i++) {
-    const t = i / fps;
-    let bmp: ImageBitmap;
-    try {
-      bmp = await dec.frameAt(t);
-    } catch {
-      continue;
+  // Sequential decode → true per-time frames (not keyframe snaps), so OCR sees
+  // the frames that actually carry subtitles.
+  let processed = 0;
+  for await (const { bitmap, time } of dec.sampleFrames(fps)) {
+    if (W === 0) {
+      W = bitmap.width;
+      H = bitmap.height;
+      rects = (opts.zones && opts.zones.length ? opts.zones : defaultZone).map((z) => pxRect(z, W, H));
+      samples = rects.map(() => []);
     }
     for (let zi = 0; zi < rects.length; zi++) {
       const r = rects[zi];
       work.width = r.w;
       work.height = r.h;
       const ctx = work.getContext("2d")!;
-      ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      // Presence gate: skip OCR on frames with no text-like content (gaps), but
-      // OCR every frame that does show text so the consensus vote in mergeCues
-      // can outvote single-frame misreads.
+      ctx.drawImage(bitmap, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      // OCR every text-bearing frame so the consensus vote in mergeCues can
+      // outvote single-frame misreads; skip frames with no text-like content.
       let text = "";
       if (maskDensity(textMask(work)) > 0.012) {
         const res = await ocr.recognize(work, { flatten: true });
         const raw = (res?.text ?? "").trim();
         text = isJunk(raw) ? "" : raw;
       }
-      samples[zi].push({ t, text, an: alignmentForZone(r, H) });
+      samples[zi].push({ t: time, text, an: alignmentForZone(r, H) });
     }
-    bmp.close();
-    if (i % 5 === 0) onProgress(6 + Math.round((i / total) * 84), "ocr");
+    bitmap.close();
+    if (++processed % 5 === 0) onProgress(6 + Math.min(84, Math.round((processed / total) * 84)), "ocr");
   }
 
   onProgress(94, "merging");
@@ -224,5 +225,5 @@ export async function extractInBrowser(
 
   dec.destroy();
   onProgress(100, "done");
-  return { cues, width: W, height: H };
+  return { cues, width: W || 1280, height: H || 720 };
 }
