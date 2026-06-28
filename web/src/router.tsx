@@ -3,7 +3,8 @@ import { RootLayout } from "@/app/RootLayout";
 import { Login } from "@/routes/Login";
 import { Dashboard } from "@/routes/Dashboard";
 import { JobDetail } from "@/routes/JobDetail";
-import { Admin, Editor } from "@/routes/stubs";
+import { Editor } from "@/routes/Editor";
+import { Admin } from "@/routes/stubs";
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
