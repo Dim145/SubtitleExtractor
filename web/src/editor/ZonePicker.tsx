@@ -8,6 +8,7 @@ import type { Zone } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { subtitleFilename } from "@/lib/format";
+import { cn } from "@/lib/cn";
 import { loadZones, saveZones, loadLang, saveLang } from "@/lib/zonePrefs";
 
 // OCR language hint sent to the server job ("" = auto-detect).
@@ -154,9 +155,16 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
 
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-3">
             <Button variant="default" size="sm" disabled={zones.length >= 2} onClick={() => setZones((z) => [...z, { x: 0.3, y: 0.1, w: 0.4, h: 0.14 }])}><Plus className="size-3.5" /> Add zone</Button>
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex items-center gap-1.5">
               {FORMATS.map((f) => (
-                <label key={f} className="flex items-center gap-1.5 text-muted"><input type="checkbox" className="size-4" checked={formats.has(f)} onChange={() => toggle(f)} /> {f.toUpperCase()}</label>
+                <button
+                  key={f} type="button" onClick={() => toggle(f)}
+                  aria-pressed={formats.has(f)}
+                  className={cn(
+                    "rounded-lg border px-2.5 py-1 text-xs font-semibold transition",
+                    formats.has(f) ? "border-accent bg-accent/15 text-accent" : "border-border-strong text-muted hover:border-accent/50 hover:text-fg",
+                  )}
+                >{f.toUpperCase()}</button>
               ))}
             </div>
             <label className="ml-auto flex items-center gap-2 text-sm text-muted">

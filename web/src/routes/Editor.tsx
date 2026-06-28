@@ -326,20 +326,30 @@ export function Editor() {
             </label>
 
             <div className="mt-4 grid gap-2">
-              <label className={cn("flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 text-sm", saveMode === "overwrite" ? "border-accent bg-accent/10" : "border-border", !sourceResultId && "cursor-not-allowed opacity-50")}>
-                <input type="radio" className="mt-0.5" name="savemode" disabled={!sourceResultId} checked={saveMode === "overwrite"} onChange={() => setSaveMode("overwrite")} />
+              <button
+                type="button" disabled={!sourceResultId} onClick={() => setSaveMode("overwrite")}
+                className={cn("flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left text-sm transition", saveMode === "overwrite" ? "border-accent bg-accent/10" : "border-border hover:border-border-strong", !sourceResultId && "cursor-not-allowed opacity-50")}
+              >
+                <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", saveMode === "overwrite" ? "border-accent" : "border-border-strong")}>
+                  {saveMode === "overwrite" && <span className="size-2 rounded-full bg-accent" />}
+                </span>
                 <span>
                   <div className="font-medium">Overwrite current file</div>
                   <div className="text-xs text-muted">Replaces {sourceResultName ? <span className="font-mono">{sourceResultName}</span> : "the file you opened"}.</div>
                 </span>
-              </label>
-              <label className={cn("flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 text-sm", saveMode === "new" ? "border-accent bg-accent/10" : "border-border")}>
-                <input type="radio" className="mt-0.5" name="savemode" checked={saveMode === "new"} onChange={() => setSaveMode("new")} />
+              </button>
+              <button
+                type="button" onClick={() => setSaveMode("new")}
+                className={cn("flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left text-sm transition", saveMode === "new" ? "border-accent bg-accent/10" : "border-border hover:border-border-strong")}
+              >
+                <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", saveMode === "new" ? "border-accent" : "border-border-strong")}>
+                  {saveMode === "new" && <span className="size-2 rounded-full bg-accent" />}
+                </span>
                 <span>
                   <div className="font-medium">Save as new file</div>
                   <div className="text-xs text-muted">Adds a new subtitle file to this job.</div>
                 </span>
-              </label>
+              </button>
             </div>
 
             <div className="mt-5 flex justify-end gap-2">

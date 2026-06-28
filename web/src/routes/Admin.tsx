@@ -8,6 +8,7 @@ import {
 import type { ConfigField, OCRSubstitutionRule, SiteSettings, Worker } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/cn";
 
 const TABS = [
@@ -111,7 +112,7 @@ function WorkerConfig({ worker }: { worker: Worker }) {
                 {(f.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             ) : f.type === "boolean" ? (
-              <input type="checkbox" className="size-4" checked={Boolean(values[f.key])} onChange={(e) => set(f.key, e.target.checked)} />
+              <div className="pt-0.5"><Switch checked={Boolean(values[f.key])} onCheckedChange={(v) => set(f.key, v)} aria-label={f.label} /></div>
             ) : f.type === "number" ? (
               <input type="number" className={input} min={f.min} max={f.max} step={f.step} value={String(values[f.key] ?? "")} onChange={(e) => set(f.key, e.target.value === "" ? "" : Number(e.target.value))} />
             ) : (
@@ -176,7 +177,7 @@ function Substitutions() {
             <div key={i} className="grid grid-cols-[1fr_1fr_64px_120px_36px] items-center gap-2">
               <input className={cn(input, "font-mono", regexError(r) && "border-err")} value={r.find} onChange={(e) => patch(i, { find: e.target.value })} placeholder="pattern" />
               <input className={cn(input, "font-mono")} value={r.replace} onChange={(e) => patch(i, { replace: e.target.value })} placeholder="replacement" />
-              <input type="checkbox" className="mx-auto size-4" checked={r.isRegex} onChange={(e) => patch(i, { isRegex: e.target.checked })} />
+              <div className="flex justify-center"><Switch checked={r.isRegex} onCheckedChange={(v) => patch(i, { isRegex: v })} aria-label="Regex" /></div>
               <select className={input} value={r.applyTo} onChange={(e) => patch(i, { applyTo: e.target.value })}>
                 {LANGS.map((l) => <option key={l} value={l}>{l === "all" ? "All" : l}</option>)}
               </select>
@@ -208,7 +209,7 @@ function Users() {
         {users.data?.map((u, i) => (
           <div key={u.id} className={cn("flex items-center gap-3 bg-surface px-4 py-3", i > 0 && "border-t border-border")}>
             <div className="flex-1"><div className="font-medium">{u.displayName || u.email}</div><div className="font-mono text-xs text-faint">{u.email} · {u.provider}</div></div>
-            <label className="flex items-center gap-1.5 text-xs text-muted"><input type="checkbox" className="size-4" checked={u.isAdmin} onChange={(e) => patch.mutate({ id: u.id, isAdmin: e.target.checked })} /> admin</label>
+            <span className="flex items-center gap-2 text-xs text-muted"><Switch checked={u.isAdmin} onCheckedChange={(v) => patch.mutate({ id: u.id, isAdmin: v })} aria-label="Admin" /> admin</span>
             <Button variant="ghost" size="icon" className="hover:text-err" onClick={() => del.mutate(u.id)}><Trash2 className="size-4" /></Button>
           </div>
         ))}
@@ -238,7 +239,7 @@ function Settings() {
   return (
     <form className="grid max-w-lg gap-4 rounded-xl border border-border bg-surface p-5"
       onSubmit={(e) => { e.preventDefault(); save.mutate(form, { onSuccess: () => setSaved(true) }); }}>
-      <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="size-4" checked={form.registrationEnabled} onChange={(e) => upd({ registrationEnabled: e.target.checked })} /> Allow self-registration</label>
+      <span className="flex items-center gap-2.5 text-sm"><Switch checked={form.registrationEnabled} onCheckedChange={(v) => upd({ registrationEnabled: v })} aria-label="Allow self-registration" /> Allow self-registration</span>
       <label className="grid gap-1"><span className="text-xs font-medium text-muted">Default OCR backend</span>
         <select className={input} value={form.defaultOcrBackend} onChange={(e) => upd({ defaultOcrBackend: e.target.value })}>
           <option value="">(worker default)</option><option value="rapidocr">RapidOCR</option><option value="ppocr">PP-OCR</option><option value="paddleocr_vl">PaddleOCR-VL</option>
