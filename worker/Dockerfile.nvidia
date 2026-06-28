@@ -37,4 +37,11 @@ RUN pip install --no-cache-dir --upgrade pip "paddleocr==3.7.0"
 COPY . /app
 RUN pip install --no-cache-dir . && rm -rf /root/.cache
 
+# The worker has no HTTP server; it touches /tmp/subextractor.health every ~5s
+# from a daemon thread. Unhealthy if that file is missing or older than 60s
+# (process dead or hung). GNU stat/date are present on the Debian base.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD test -f /tmp/subextractor.health && \
+        [ "$(( $(date +%s) - $(stat -c %Y /tmp/subextractor.health) ))" -lt 60 ]
+
 ENTRYPOINT ["python", "-m", "subextractor"]

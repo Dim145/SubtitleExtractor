@@ -23,7 +23,8 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     deploy:
       resources:
         reservations:

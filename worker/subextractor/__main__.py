@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
+from pathlib import Path
 
 from .client import APIClient
 from .config import Config
@@ -16,11 +18,29 @@ from .runner import JobRunner
 log = logging.getLogger("subextractor")
 
 
+def _start_health_pinger() -> None:
+    """Touch a liveness file every few seconds from a daemon thread, so a
+    container HEALTHCHECK can detect a hung/dead worker even while the main loop
+    is blocked running a job. The thread only stops if the process itself dies."""
+    path = os.environ.get("WORKER_HEALTH_FILE", "/tmp/subextractor.health")
+
+    def _ping() -> None:
+        while True:
+            try:
+                Path(path).touch()
+            except OSError:
+                pass
+            time.sleep(5)
+
+    threading.Thread(target=_ping, name="health-pinger", daemon=True).start()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
     client = APIClient(cfg)
     runner = JobRunner(cfg)
+    _start_health_pinger()
     log.info("worker started: name=%s class=%s api=%s", cfg.worker_name, cfg.worker_class, cfg.api_base_url)
 
     was_disabled = False

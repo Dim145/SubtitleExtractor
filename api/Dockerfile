@@ -15,4 +15,8 @@ RUN mkdir -p /data/blobs && chown -R app:app /data
 COPY --from=build /out/api /usr/local/bin/api
 USER app
 EXPOSE 8080
+# Liveness/readiness: the API serves /healthz (200 {"status":"ok"}).
+# busybox wget ships in the alpine base.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
 ENTRYPOINT ["/usr/local/bin/api"]
