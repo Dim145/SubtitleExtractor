@@ -56,23 +56,43 @@ function alignmentForZone(rect: Rect, h: number): number {
   return 2; // bottom-center
 }
 
-// Cheap perceptual diff to skip OCR on unchanged bands.
-function bandSignature(canvas: HTMLCanvasElement): Uint8ClampedArray {
-  const small = document.createElement("canvas");
-  small.width = 32;
-  small.height = 8;
-  const ctx = small.getContext("2d")!;
-  ctx.drawImage(canvas, 0, 0, 32, 8);
-  return ctx.getImageData(0, 0, 32, 8).data;
+// Change detection on a *text mask* rather than mean RGB: subtitles are bright
+// (high-luma) text over a darker outline, a small fraction of the band's pixels.
+// A mean-RGB diff is dominated by the (static) background and misses subtitle
+// changes, so OCR gets skipped and a stale/garbage result sticks. Comparing a
+// downscaled binary mask of bright pixels tracks the text shape instead.
+let _maskCanvas: HTMLCanvasElement | null = null;
+const MASK_W = 64;
+const MASK_H = 16;
+
+function textMask(src: HTMLCanvasElement): Uint8Array {
+  _maskCanvas ??= document.createElement("canvas");
+  _maskCanvas.width = MASK_W;
+  _maskCanvas.height = MASK_H;
+  const ctx = _maskCanvas.getContext("2d")!;
+  ctx.drawImage(src, 0, 0, MASK_W, MASK_H);
+  const d = ctx.getImageData(0, 0, MASK_W, MASK_H).data;
+  const mask = new Uint8Array(MASK_W * MASK_H);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const luma = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    mask[p] = luma > 160 ? 1 : 0; // bright → likely text
+  }
+  return mask;
 }
 
-function similarSignature(a: Uint8ClampedArray, b: Uint8ClampedArray): boolean {
+function maskChanged(a: Uint8Array, b: Uint8Array): boolean {
   let diff = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    diff += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
-  }
-  const avg = diff / (a.length / 4) / 3;
-  return avg < 8; // ~3% mean channel difference
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
+  return diff / a.length > 0.04; // >4% of cells flipped ⇒ the text changed
+}
+
+// Drop obvious OCR noise (single stray glyphs like "R", punctuation-only reads)
+// so a bad transient frame can't seed a cue.
+function isJunk(s: string): boolean {
+  const c = s.replace(/\s/g, "");
+  if (c.length < 2) return true;
+  if (!/[\p{L}\p{N}]/u.test(c)) return true;
+  return false;
 }
 
 function levRatio(a: string, b: string): number {
@@ -156,7 +176,7 @@ export async function extractInBrowser(
     (z) => pxRect(z, W, H),
   );
   const samples: Sample[][] = rects.map(() => []);
-  const prevSig: (Uint8ClampedArray | null)[] = rects.map(() => null);
+  const prevMask: (Uint8Array | null)[] = rects.map(() => null);
   const prevText: string[] = rects.map(() => "");
 
   const work = document.createElement("canvas");
@@ -175,15 +195,16 @@ export async function extractInBrowser(
       work.height = r.h;
       const ctx = work.getContext("2d")!;
       ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      const sig = bandSignature(work);
+      const mask = textMask(work);
 
       let text: string;
-      if (prevSig[zi] && similarSignature(sig, prevSig[zi]!)) {
+      if (prevMask[zi] && !maskChanged(mask, prevMask[zi]!)) {
         text = prevText[zi];
       } else {
         const res = await ocr.recognize(work, { flatten: true });
-        text = (res?.text ?? "").trim();
-        prevSig[zi] = sig;
+        const raw = (res?.text ?? "").trim();
+        text = isJunk(raw) ? "" : raw;
+        prevMask[zi] = mask;
         prevText[zi] = text;
       }
       samples[zi].push({ t, text, an: alignmentForZone(r, H) });
