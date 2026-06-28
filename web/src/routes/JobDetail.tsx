@@ -40,7 +40,7 @@ export function JobDetail() {
     <div className="mx-auto max-w-5xl px-5 py-8">
       <Link to="/" className="mb-4 inline-flex"><Button variant="ghost" size="sm"><ArrowLeft className="size-4" /> Jobs</Button></Link>
 
-      <div className="mb-4 flex items-end justify-between gap-4">
+      <div className="animate-in mb-4 flex items-end justify-between gap-4">
         <div className="min-w-0">
           <div className="font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-faint">
             {job.status}{job.progressStage ? ` · ${job.progressStage}` : ""}
@@ -61,7 +61,7 @@ export function JobDetail() {
       )}
 
       <div className="mt-6 grid gap-4 md:grid-cols-[1.4fr_1fr]">
-        <section className="rounded-xl border border-border bg-surface p-4">
+        <section className="animate-in rounded-xl border border-border bg-surface p-4" style={{ animationDelay: "60ms" }}>
           <div className="mb-2.5 text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Live log</div>
           <div ref={logRef} className="max-h-72 overflow-auto rounded-lg border border-border bg-[#05070d] p-3 font-mono text-xs leading-relaxed">
             {logs.length === 0 ? (
@@ -76,7 +76,7 @@ export function JobDetail() {
           </div>
         </section>
 
-        <section className="rounded-xl border border-border bg-surface p-4">
+        <section className="animate-in rounded-xl border border-border bg-surface p-4" style={{ animationDelay: "120ms" }}>
           <div className="mb-2.5 text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Results</div>
           {results.data && results.data.length > 0 ? (
             <div className="grid gap-2">

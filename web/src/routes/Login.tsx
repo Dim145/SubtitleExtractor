@@ -40,7 +40,7 @@ export function Login() {
 
   return (
     <div className="grid min-h-dvh place-items-center px-5">
-      <div className="w-full max-w-[380px]">
+      <div className="animate-in w-full max-w-[380px]">
         <div className="mb-5 flex items-center gap-2.5">
           <span className="grid size-11 place-items-center rounded-xl bg-gradient-to-br from-accent to-amber text-accent-foreground">
             <Captions className="size-5" />
