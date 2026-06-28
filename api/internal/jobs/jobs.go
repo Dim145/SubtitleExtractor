@@ -215,7 +215,8 @@ func (r *Repo) AddResult(ctx context.Context, jobID, kind, storageKey, language,
 }
 
 // ReplaceResult overwrites an existing result's metadata (its storage object is
-// replaced separately by the caller). Used for the editor's "overwrite" save.
+// replaced in place at the same key by the caller). Used for the editor's
+// "overwrite" save when the kind — and therefore the storage key — is unchanged.
 func (r *Repo) ReplaceResult(ctx context.Context, id, kind, name, language string, byteSize int64, sha256 string) (*Result, error) {
 	var res Result
 	err := scanResult(r.pool.QueryRow(ctx, `
@@ -223,6 +224,22 @@ func (r *Repo) ReplaceResult(ctx context.Context, id, kind, name, language strin
 		WHERE id=$1
 		RETURNING `+resultCols,
 		id, kind, strPtr(name), strPtr(language), byteSize, strPtr(sha256)), &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// ReplaceResultWithKey is like ReplaceResult but also moves the result to a new
+// storage key. Used when an overwrite changes the kind (and thus the object's
+// extension), so storage_key stays consistent with the stored object.
+func (r *Repo) ReplaceResultWithKey(ctx context.Context, id, kind, storageKey, name, language string, byteSize int64, sha256 string) (*Result, error) {
+	var res Result
+	err := scanResult(r.pool.QueryRow(ctx, `
+		UPDATE job_results SET kind=$2, storage_key=$3, name=$4, language=$5, byte_size=$6, sha256=$7
+		WHERE id=$1
+		RETURNING `+resultCols,
+		id, kind, storageKey, strPtr(name), strPtr(language), byteSize, strPtr(sha256)), &res)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -212,9 +213,11 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 	}
 	// When overwriting, we must resolve the target's storage key before storing,
 	// so buffer the small subtitle body and process fields first.
+	const maxBody = 8 << 20 // subtitles are tiny; cap and reject anything larger.
 	var (
-		body   []byte
-		fields = map[string]string{}
+		body        []byte
+		fields      = map[string]string{}
+		namePresent bool
 	)
 	for {
 		part, err := mr.NextPart()
@@ -226,10 +229,21 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if part.FormName() == "file" {
-			body, _ = io.ReadAll(io.LimitReader(part, 8<<20)) // subtitles are tiny
+			// Read one extra byte so we can detect (and reject) oversize uploads
+			// rather than silently truncating them.
+			body, _ = io.ReadAll(io.LimitReader(part, maxBody+1))
+			if len(body) > maxBody {
+				part.Close()
+				writeError(w, http.StatusRequestEntityTooLarge, "subtitle exceeds 8MB limit")
+				return
+			}
 		} else {
 			buf, _ := io.ReadAll(io.LimitReader(part, 1<<16))
-			fields[part.FormName()] = strings.TrimSpace(string(buf))
+			val := strings.TrimSpace(string(buf))
+			if part.FormName() == "name" {
+				namePresent = val != ""
+			}
+			fields[part.FormName()] = val
 		}
 		part.Close()
 	}
@@ -241,9 +255,13 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = "ass"
 	}
-	name := sanitizeFilename(fields["name"])
-	if name == "upload.bin" {
-		name = ""
+	// Only derive a name when one was actually provided; don't depend on the
+	// sanitize sentinel to detect "no name".
+	name := ""
+	if namePresent {
+		if n := sanitizeFilename(fields["name"]); n != "upload.bin" {
+			name = n
+		}
 	}
 
 	// Overwrite an existing result, or create a new one.
@@ -257,17 +275,18 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 		overwrite = ex
 	}
 
-	storageKey := ""
-	if overwrite != nil {
+	// Decide the storage key. On a new result, or when an overwrite changes the
+	// kind (and thus the object's extension), mint a fresh key so storage_key
+	// stays consistent with the stored object. Otherwise reuse the existing key.
+	newKey := "results/" + job.ID + "/" + uuid.NewString() + "-" + resultBase(name, kind)
+	storageKey := newKey
+	keyChanged := true
+	if overwrite != nil && overwrite.Kind == kind {
 		storageKey = overwrite.StorageKey
-	} else {
-		base := name
-		if base == "" {
-			base = "edited." + kind
-		}
-		storageKey = "results/" + job.ID + "/" + uuid.NewString() + "-" + base
+		keyChanged = false
 	}
-	if err := s.store.Put(r.Context(), storageKey, strings.NewReader(string(body)), int64(len(body)), "text/plain; charset=utf-8"); err != nil {
+
+	if err := s.store.Put(r.Context(), storageKey, bytes.NewReader(body), int64(len(body)), "text/plain; charset=utf-8"); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store subtitle")
 		return
 	}
@@ -275,14 +294,21 @@ func (s *Server) handleSaveResult(w http.ResponseWriter, r *http.Request) {
 
 	var res *jobs.Result
 	var err2 error
-	if overwrite != nil {
+	switch {
+	case overwrite != nil && keyChanged:
+		res, err2 = s.jobs.ReplaceResultWithKey(r.Context(), overwrite.ID, kind, storageKey, name, fields["language"], size, "")
+	case overwrite != nil:
 		res, err2 = s.jobs.ReplaceResult(r.Context(), overwrite.ID, kind, name, fields["language"], size, "")
-	} else {
+	default:
 		res, err2 = s.jobs.AddResult(r.Context(), job.ID, kind, storageKey, fields["language"], name, size, "")
 	}
 	if err2 != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record subtitle")
 		return
+	}
+	// On a successful key change, drop the now-orphaned old object (best effort).
+	if overwrite != nil && keyChanged {
+		_ = s.store.Delete(r.Context(), overwrite.StorageKey)
 	}
 	writeJSON(w, http.StatusCreated, res)
 }
@@ -299,19 +325,28 @@ func (s *Server) handleDeleteResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "result not found")
 		return
 	}
-	_ = s.store.Delete(r.Context(), res.StorageKey)
+	// Delete the DB row first so the user-facing state is consistent even if a
+	// storage delete later fails (an orphaned blob is harmless; a dangling row
+	// pointing at a missing object is not). Storage cleanup is best-effort.
 	if err := s.jobs.DeleteResult(r.Context(), res.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete result")
 		return
 	}
 	remaining, _ := s.jobs.Results(r.Context(), job.ID)
 	if len(remaining) == 0 {
-		_ = s.store.Delete(r.Context(), job.InputKey)
+		// Last result: delete the job row before touching the input object so we
+		// never orphan a job whose input has already been removed.
+		if err := s.jobs.Delete(r.Context(), job.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to delete job")
+			return
+		}
 		_ = s.workers.ClearJob(r.Context(), job.ID)
-		_ = s.jobs.Delete(r.Context(), job.ID)
+		_ = s.store.Delete(r.Context(), res.StorageKey)
+		_ = s.store.Delete(r.Context(), job.InputKey)
 		writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": true})
 		return
 	}
+	_ = s.store.Delete(r.Context(), res.StorageKey)
 	writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": false})
 }
 
@@ -377,17 +412,23 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Remove result files, then the input, then the row (logs/results cascade).
+	// Collect the storage keys before the row (and its cascaded results) are
+	// gone, but delete the DB row FIRST so the user-facing state is consistent;
+	// blob cleanup is best-effort afterwards. An orphaned blob is harmless; a
+	// row pointing at deleted objects is not.
+	keys := []string{job.InputKey}
 	if results, err := s.jobs.Results(r.Context(), job.ID); err == nil {
 		for _, res := range results {
-			_ = s.store.Delete(r.Context(), res.StorageKey)
+			keys = append(keys, res.StorageKey)
 		}
 	}
-	_ = s.store.Delete(r.Context(), job.InputKey)
-	_ = s.workers.ClearJob(r.Context(), job.ID)
 	if err := s.jobs.Delete(r.Context(), job.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete job")
 		return
+	}
+	_ = s.workers.ClearJob(r.Context(), job.ID)
+	for _, k := range keys {
+		_ = s.store.Delete(r.Context(), k)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -405,6 +446,15 @@ func (s *Server) ownedJob(w http.ResponseWriter, r *http.Request) (*jobs.Job, bo
 		return nil, false
 	}
 	return job, true
+}
+
+// resultBase returns the filename portion of a saved-result storage key: the
+// provided (already-sanitized) name when present, else a kind-derived default.
+func resultBase(name, kind string) string {
+	if name != "" {
+		return name
+	}
+	return "edited." + kind
 }
 
 // sanitizeFilename strips any path components from an uploaded filename.
