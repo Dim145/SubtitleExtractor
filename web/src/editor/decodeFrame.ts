@@ -8,7 +8,15 @@ import { WebDemuxer } from "web-demuxer";
 // The full ffmpeg loader (supports mkv/hevc/etc. demuxing), served SAME-ORIGIN
 // by the web-demuxer-assets Vite plugin (see vite.config.ts). Must not be a CDN
 // URL — that's CORS-blocked and fails offline / behind nginx.
-const WASM_LOADER = "/web-demuxer/ffmpeg.js";
+//
+// web-demuxer spawns its worker from a `data:` URL and then does
+// `import(wasmLoaderPath)` *inside* that worker. A `data:` URL has no base to
+// resolve a root-relative path against, so a path like "/web-demuxer/ffmpeg.js"
+// throws "error resolving module specifier" in Firefox (Chrome is lenient). Pass
+// a fully-qualified absolute URL so resolution never depends on the worker base.
+function wasmLoaderUrl(): string {
+  return new URL("/web-demuxer/ffmpeg.js", location.href).href;
+}
 
 export function webCodecsAvailable(): boolean {
   return typeof window !== "undefined" && "VideoDecoder" in window;
@@ -22,7 +30,7 @@ export class FrameDecoder {
   duration = 0;
 
   async init(file: File): Promise<ImageBitmap> {
-    const d = new WebDemuxer({ wasmLoaderPath: WASM_LOADER });
+    const d = new WebDemuxer({ wasmLoaderPath: wasmLoaderUrl() });
     await d.load(file);
     this.demuxer = d;
     try {
