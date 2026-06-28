@@ -80,10 +80,13 @@ function textMask(src: HTMLCanvasElement): Uint8Array {
   return mask;
 }
 
-function maskChanged(a: Uint8Array, b: Uint8Array): boolean {
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
-  return diff / a.length > 0.04; // >4% of cells flipped ⇒ the text changed
+// Fraction of bright (text-like) cells — a cheap "is there text here?" gate so we
+// skip OCR on empty frames (gaps between subtitles) without skipping frames that
+// actually show text.
+function maskDensity(mask: Uint8Array): number {
+  let n = 0;
+  for (let i = 0; i < mask.length; i++) n += mask[i];
+  return n / mask.length;
 }
 
 // Drop obvious OCR noise (single stray glyphs like "R", punctuation-only reads)
@@ -120,33 +123,39 @@ interface Sample {
   an: number;
 }
 
+// Group consecutive frames showing (roughly) the same text into one cue and
+// majority-vote the text across the run, so a single misread frame can't define
+// the cue. Up to 2 blank frames (OCR drops / fades) are bridged within a cue.
 function mergeCues(samples: Sample[], frameInterval: number): Cue[] {
   const cues: Cue[] = [];
-  let cur: Cue | null = null;
   let counter = 0;
+  type Group = { start: number; end: number; an: number; votes: Map<string, number>; blanks: number };
+  let group: Group | null = null;
+  const winner = (votes: Map<string, number>): string => {
+    let best = "", bc = 0;
+    for (const [txt, c] of votes) if (c > bc || (c === bc && txt.length > best.length)) { best = txt; bc = c; }
+    return best;
+  };
+  const flush = () => {
+    if (!group) return;
+    const text = winner(group.votes);
+    if (text) cues.push({ id: `c-${counter++}`, start: group.start, end: group.end + frameInterval, text, an: group.an });
+    group = null;
+  };
   for (const s of samples) {
     const t = s.text.trim();
-    if (!t) {
-      if (cur) {
-        cur.end = s.t;
-        cues.push(cur);
-        cur = null;
-      }
-      continue;
-    }
-    if (cur && levRatio(t, cur.text) >= 0.8) {
-      cur.end = s.t;
-      if (t.length > cur.text.length) {
-        cur.text = t;
-        cur.an = s.an;
-      }
+    if (!t) { if (group && ++group.blanks > 2) flush(); continue; }
+    if (group && levRatio(t, winner(group.votes)) >= 0.6) {
+      group.votes.set(t, (group.votes.get(t) ?? 0) + 1);
+      group.end = s.t;
+      group.blanks = 0;
+      group.an = s.an;
     } else {
-      if (cur) cues.push(cur);
-      cur = { id: `c-${counter++}`, start: s.t, end: s.t, text: t, an: s.an };
+      flush();
+      group = { start: s.t, end: s.t, an: s.an, votes: new Map([[t, 1]]), blanks: 0 };
     }
   }
-  if (cur) cues.push(cur);
-  for (const c of cues) c.end += frameInterval;
+  flush();
   return cues;
 }
 
@@ -176,8 +185,6 @@ export async function extractInBrowser(
     (z) => pxRect(z, W, H),
   );
   const samples: Sample[][] = rects.map(() => []);
-  const prevMask: (Uint8Array | null)[] = rects.map(() => null);
-  const prevText: string[] = rects.map(() => "");
 
   const work = document.createElement("canvas");
 
@@ -195,17 +202,14 @@ export async function extractInBrowser(
       work.height = r.h;
       const ctx = work.getContext("2d")!;
       ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      const mask = textMask(work);
-
-      let text: string;
-      if (prevMask[zi] && !maskChanged(mask, prevMask[zi]!)) {
-        text = prevText[zi];
-      } else {
+      // Presence gate: skip OCR on frames with no text-like content (gaps), but
+      // OCR every frame that does show text so the consensus vote in mergeCues
+      // can outvote single-frame misreads.
+      let text = "";
+      if (maskDensity(textMask(work)) > 0.012) {
         const res = await ocr.recognize(work, { flatten: true });
         const raw = (res?.text ?? "").trim();
         text = isJunk(raw) ? "" : raw;
-        prevMask[zi] = mask;
-        prevText[zi] = text;
       }
       samples[zi].push({ t, text, an: alignmentForZone(r, H) });
     }
