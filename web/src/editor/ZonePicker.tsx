@@ -29,7 +29,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [ready, setReady] = useState(false);
-  const [previewErr, setPreviewErr] = useState(false);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
   const [zones, setZones] = useState<Zone[]>([{ x: 0.06, y: 0.7, w: 0.88, h: 0.22 }]);
   const [formats, setFormats] = useState<Set<Fmt>>(new Set<Fmt>(["srt", "ass"]));
   const [progress, setProgress] = useState<{ pct: number; stage: string } | null>(null);
@@ -38,17 +38,21 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   useEffect(() => {
     let stop = false;
     (async () => {
-      if (!webCodecsAvailable()) { setPreviewErr(true); setReady(true); return; }
+      if (!webCodecsAvailable()) { setPreviewErr("This browser has no WebCodecs video decoder."); setReady(true); return; }
+      let dec: import("@/editor/decodeFrame").FrameDecoder | null = null;
       try {
         const { FrameDecoder } = await import("@/editor/decodeFrame");
-        const dec = new FrameDecoder();
-        await dec.init(file);
-        const bmp = await dec.frameAt(Math.min(2, 0)).catch(() => dec.init(file));
+        dec = new FrameDecoder();
+        const bmp = await dec.init(file); // init() decodes & returns a representative frame
         if (stop) return;
         const cv = canvasRef.current;
-        if (cv && bmp) { cv.width = dec.width; cv.height = dec.height; cv.getContext("2d")?.drawImage(bmp, 0, 0); }
+        if (cv) { cv.width = dec.width; cv.height = dec.height; cv.getContext("2d")?.drawImage(bmp, 0, 0); }
         setReady(true);
-      } catch { if (!stop) { setPreviewErr(true); setReady(true); } }
+      } catch (e) {
+        if (!stop) { setPreviewErr(e instanceof Error ? e.message : "Couldn't decode this file."); setReady(true); }
+      } finally {
+        dec?.destroy();
+      }
     })();
     return () => { stop = true; };
   }, [file]);
@@ -115,7 +119,13 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
           <div ref={stageRef} className="relative mx-auto aspect-video w-full overflow-hidden rounded-lg border border-border bg-black">
             {!ready && <div className="absolute inset-0 grid place-items-center"><Spinner className="size-6" /></div>}
             {previewErr ? (
-              <div className="absolute inset-0 grid place-items-center px-6 text-center text-xs text-muted">Preview unavailable in this browser — you can still set zones by ratio and extract.</div>
+              <div className="absolute inset-0 grid place-items-center px-6 text-center">
+                <div>
+                  <div className="text-sm text-muted">Preview unavailable in this browser.</div>
+                  <div className="mt-1 text-xs text-faint">Set zones by ratio and extract — it still works.</div>
+                  <div className="mt-2 break-words font-mono text-[10px] text-faint/70">{previewErr}</div>
+                </div>
+              </div>
             ) : (
               <canvas ref={canvasRef} className="absolute inset-0 size-full object-contain" />
             )}
