@@ -8,7 +8,23 @@ import type { Zone } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { subtitleFilename } from "@/lib/format";
-import { loadZones, saveZones } from "@/lib/zonePrefs";
+import { loadZones, saveZones, loadLang, saveLang } from "@/lib/zonePrefs";
+
+// OCR language hint sent to the server job ("" = auto-detect).
+const LANGUAGES: { code: string; label: string }[] = [
+  { code: "", label: "Auto-detect" },
+  { code: "en", label: "English" },
+  { code: "fr", label: "Français" },
+  { code: "es", label: "Español" },
+  { code: "de", label: "Deutsch" },
+  { code: "it", label: "Italiano" },
+  { code: "pt", label: "Português" },
+  { code: "ru", label: "Русский" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "ch", label: "中文" },
+  { code: "ar", label: "العربية" },
+];
 import { toSRT, toASS, toVTT } from "@/editor/subtitles";
 import { useSourcePlayer } from "@/editor/player/useSourcePlayer";
 import { usePlayerHotkeys } from "@/editor/player/usePlayerHotkeys";
@@ -39,6 +55,8 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   // Zone layout is remembered across extractions (localStorage).
   const [zones, setZones] = useState<Zone[]>(loadZones);
   useEffect(() => { saveZones(zones); }, [zones]);
+  const [language, setLanguage] = useState<string>(loadLang);
+  useEffect(() => { saveLang(language); }, [language]);
   const [formats, setFormats] = useState<Set<Fmt>>(new Set<Fmt>(["srt", "ass"]));
   const [progress, setProgress] = useState<{ pct: number; stage: string } | null>(null);
 
@@ -49,6 +67,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
     const form = new FormData();
     form.append("file", file);
     form.append("formats", [...formats].join(","));
+    if (language) form.append("language", language);
     if (zones.length) form.append("zones", JSON.stringify(zones));
     create.mutate(form, { onSuccess: () => { onClose(); navigate({ to: "/" }); } });
   }
@@ -133,13 +152,23 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
             }
           />
 
-          <div className="mt-3 flex flex-wrap items-center gap-3">
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-3">
             <Button variant="default" size="sm" disabled={zones.length >= 2} onClick={() => setZones((z) => [...z, { x: 0.3, y: 0.1, w: 0.4, h: 0.14 }])}><Plus className="size-3.5" /> Add zone</Button>
             <div className="flex items-center gap-2 text-sm">
               {FORMATS.map((f) => (
                 <label key={f} className="flex items-center gap-1.5 text-muted"><input type="checkbox" className="size-4" checked={formats.has(f)} onChange={() => toggle(f)} /> {f.toUpperCase()}</label>
               ))}
             </div>
+            <label className="ml-auto flex items-center gap-2 text-sm text-muted">
+              Language
+              <select
+                value={language} onChange={(e) => setLanguage(e.target.value)}
+                title="OCR language hint (server extraction)"
+                className="h-8 rounded-lg border border-border-strong bg-surface px-2 text-[13px]"
+              >
+                {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+              </select>
+            </label>
           </div>
 
           {progress && <div className="mt-3 text-xs text-muted"><span className="font-mono">{progress.pct}%</span> · {progress.stage}</div>}

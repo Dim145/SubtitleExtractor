@@ -28,3 +28,14 @@ export function loadZones(): Zone[] {
 export function saveZones(zones: Zone[]): void {
   try { localStorage.setItem(KEY, JSON.stringify(zones)); } catch { /* storage may be disabled */ }
 }
+
+// Remember the user's last OCR language hint too ("" = auto-detect).
+const LANG_KEY = "subext.lang.v1";
+
+export function loadLang(): string {
+  try { return localStorage.getItem(LANG_KEY) ?? ""; } catch { return ""; }
+}
+
+export function saveLang(lang: string): void {
+  try { localStorage.setItem(LANG_KEY, lang); } catch { /* storage may be disabled */ }
+}
