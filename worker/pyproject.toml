@@ -3,6 +3,7 @@ name = "subextractor-worker"
 version = "0.1.0"
 description = "SubtitleExtractor OCR worker (hardcoded subtitle extraction)"
 requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
 
 # Core dependencies (CPU / Apple Silicon friendly). The default OCR backend is
 # RapidOCR (ONNX). ffmpeg must be installed on the host (e.g. `brew install ffmpeg`).

@@ -171,6 +171,20 @@ export function toSRT(cues: Cue[]): string {
   );
 }
 
+export function toVTT(cues: Cue[]): string {
+  return (
+    "WEBVTT\n\n" +
+    cues
+      .slice()
+      .sort((a, b) => a.start - b.start)
+      .map(
+        (c, i) =>
+          `${i + 1}\n${srtTime(c.start).replace(",", ".")} --> ${srtTime(c.end).replace(",", ".")}\n${c.text}\n`,
+      )
+      .join("\n")
+  );
+}
+
 export function toASS(cues: Cue[], width: number, height: number): string {
   const fontsize = Math.max(16, Math.round(height * 0.05));
   const header = `[Script Info]

@@ -12,17 +12,26 @@ import tempfile
 from typing import Any
 
 import cv2
+import numpy as np
 
-from .backends import OCRBackend, OCRLine, get_backend
+from .backends import OCRBackend, get_backend
 from .client import APIClient
 from .config import Config
-from .dedup import Cue, alignment_from_bbox, merge_into_cues, ssim_similar
-from .formats import write_ass, write_srt
+from .dedup import (
+    Cue,
+    alignment_from_bbox,
+    mask_diff_ratio,
+    merge_into_cues,
+    text_mask,
+    text_presence,
+)
+from .formats import write_ass, write_srt, write_vtt
 from .video import probe, sample_frames_auto
 
 # Built-in fallbacks when neither the job nor the worker config specify a value.
 DEFAULT_FPS = 4.0
-DEFAULT_MIN_CONFIDENCE = 0.6
+# Lower per-line confidence floor: recall first, then precision via post-filters.
+DEFAULT_MIN_CONFIDENCE = 0.4
 DEFAULT_BACKEND = "rapidocr"
 
 
@@ -43,15 +52,6 @@ def _pick(params: dict, wcfg: dict, key: str, default: Any) -> Any:
     if wcfg.get(key) is not None:
         return wcfg[key]
     return default
-
-
-def _union_bbox(lines: list[OCRLine]) -> tuple[float, float, float, float]:
-    return (
-        min(l.bbox[0] for l in lines),
-        min(l.bbox[1] for l in lines),
-        max(l.bbox[2] for l in lines),
-        max(l.bbox[3] for l in lines),
-    )
 
 
 def _resolve_zones(params: dict, wcfg: dict, width: int, height: int) -> list[tuple[int, int, int, int]]:
@@ -87,6 +87,14 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
     language = params.get("language")
     formats = params.get("formats") or ["srt", "ass"]
 
+    # Quality knobs (admin/job tunable).
+    upscale = float(_pick(params, wcfg, "upscale", 2.0))
+    presence_thr = float(_pick(params, wcfg, "text_presence_threshold", 0.008))
+    change_thr = float(_pick(params, wcfg, "change_threshold", 0.01))
+    min_frames = int(_pick(params, wcfg, "min_frames", 2))
+    min_duration = float(_pick(params, wcfg, "min_subtitle_duration", 0.4))
+    drop_junk = bool(_pick(params, wcfg, "drop_junk", True))
+
     with tempfile.TemporaryDirectory(prefix="subext-") as tmp:
         video_path = os.path.join(tmp, job.get("sourceFilename") or "input.bin")
 
@@ -112,28 +120,35 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
             f"video {info.width}x{info.height} @ {info.fps:.2f}fps, ~{info.duration:.0f}s, {len(zones)} zone(s)",
         )
 
-        # Per-zone accumulators.
+        # Per-zone accumulators. Alignment comes from the zone position (stable,
+        # independent of OCR boxes / upscaling).
         samples: list[list[tuple[float, str, int]]] = [[] for _ in zones]
-        prev_gray: list[Any] = [None for _ in zones]
-        prev_lines: list[list[OCRLine]] = [[] for _ in zones]
+        zone_an = [alignment_from_bbox((0, 0, zw, zh), info.width, info.height, zx, zy)
+                   for (zx, zy, zw, zh) in zones]
+        prev_mask: list[Any] = [None for _ in zones]
+        prev_lines: list[list] = [[] for _ in zones]
 
         for i, sf in enumerate(sample_frames_auto(video_path, sample_fps, decoder, hwaccel)):
             for zi, (zx, zy, zw, zh) in enumerate(zones):
                 crop = sf.image[zy:zy + zh, zx:zx + zw]
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                if prev_gray[zi] is not None and ssim_similar(gray, prev_gray[zi]):
-                    lines = prev_lines[zi]
-                else:
-                    lines = backend.recognize(crop)
-                    prev_gray[zi], prev_lines[zi] = gray, lines
+                mask = text_mask(gray)
+                fg = float(np.count_nonzero(mask)) / max(1, mask.size)
 
-                good = [l for l in lines if l.confidence >= min_conf and len(l.text.strip()) >= 2]
-                text = "\n".join(l.text for l in good if l.text)
-                if good and text:
-                    an = alignment_from_bbox(_union_bbox(good), sf.width, sf.height, zx, zy)
+                if fg < 0.002 or text_presence(gray) < presence_thr:
+                    lines = []  # no text-like content → skip OCR (avoids hallucinations)
+                elif prev_mask[zi] is not None and mask_diff_ratio(mask, prev_mask[zi]) < change_thr:
+                    lines = prev_lines[zi]  # text unchanged → reuse last reading
                 else:
-                    an = 2
-                samples[zi].append((sf.timestamp, text, an))
+                    ocr_img = crop
+                    if upscale > 1.0:
+                        ocr_img = cv2.resize(crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+                    lines = backend.recognize(ocr_img)
+                prev_mask[zi], prev_lines[zi] = mask, lines
+
+                good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
+                text = "\n".join(l.text for l in good if l.text)
+                samples[zi].append((sf.timestamp, text, zone_an[zi]))
 
             if i % 15 == 0:
                 pct = 6 + int(min(80, (i / est_total) * 80))
@@ -142,7 +157,15 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
         client.progress(job_id, 88, "merging", log="merging frames into cues")
         cues: list[Cue] = []
         for zi in range(len(zones)):
-            cues.extend(merge_into_cues(samples[zi], frame_interval=frame_interval))
+            cues.extend(
+                merge_into_cues(
+                    samples[zi],
+                    frame_interval=frame_interval,
+                    min_duration=min_duration,
+                    min_frames=min_frames,
+                    drop_junk=drop_junk,
+                )
+            )
         cues.sort(key=lambda c: c.start)
         client.log(job_id, f"produced {len(cues)} subtitle cues")
         if not cues:
@@ -157,5 +180,9 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
             ass_path = os.path.join(tmp, "subtitles.ass")
             write_ass(cues, ass_path, info.width, info.height)
             client.upload_result(job_id, ass_path, kind="ass", language=language)
+        if "vtt" in formats:
+            vtt_path = os.path.join(tmp, "subtitles.vtt")
+            write_vtt(cues, vtt_path)
+            client.upload_result(job_id, vtt_path, kind="vtt", language=language)
 
         client.progress(job_id, 100, "done", log="extraction complete")

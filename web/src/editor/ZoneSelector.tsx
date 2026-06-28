@@ -3,7 +3,7 @@ import { Rnd } from "react-rnd";
 import type { Zone } from "../api/types";
 import { Spinner } from "../components/ui";
 import { FrameDecoder, webCodecsAvailable } from "./decodeFrame";
-import { toASS, toSRT } from "./subtitles";
+import { toASS, toSRT, toVTT } from "./subtitles";
 
 // Tiny check kept inline so the heavy OCR engine isn't pulled into the main
 // bundle — extractInBrowser is dynamically imported only on demand.
@@ -230,7 +230,7 @@ export function ZoneSelector({
       );
       if (formats.includes("srt")) downloadText("subtitles.srt", toSRT(cues));
       if (formats.includes("ass")) downloadText("subtitles.ass", toASS(cues, width, height));
-      if (formats.includes("vtt")) downloadText("subtitles.srt", toSRT(cues));
+      if (formats.includes("vtt")) downloadText("subtitles.vtt", toVTT(cues));
       setClientStage(`done — ${cues.length} cues`);
     } catch (e) {
       console.error(e);

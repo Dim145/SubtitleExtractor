@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -20,6 +21,30 @@ from .base import OCRBackend, OCRLine
 
 DEFAULT_MODEL = "mlx-community/PaddleOCR-VL-1.5-4bit"
 OCR_PROMPT = "OCR:"
+
+
+def _is_degenerate(text: str) -> bool:
+    """True when the VLM output looks like a repetition loop / single-char spam —
+    the classic VLM hallucination on a near-empty crop (e.g. "1111111", "的的的的")."""
+    t = text.strip()
+    if len(t) < 6:
+        return False
+    body = t.replace(" ", "")
+    if body:
+        char, n = Counter(body).most_common(1)[0]
+        if n / len(body) > 0.6:  # one character dominates
+            return True
+    tokens = t.split()
+    if len(tokens) >= 6:
+        _, n = Counter(tokens).most_common(1)[0]
+        if n / len(tokens) > 0.5:  # one word repeated over and over
+            return True
+    trigrams = [t[i:i + 3] for i in range(len(t) - 2)]
+    if trigrams:
+        _, n = Counter(trigrams).most_common(1)[0]
+        if n > max(4, len(trigrams) * 0.3):  # a 3-gram loops
+            return True
+    return False
 
 
 class PaddleOCRVLBackend(OCRBackend):
@@ -34,6 +59,10 @@ class PaddleOCRVLBackend(OCRBackend):
         self._generate = generate
         self._apply_chat_template = apply_chat_template
         self.model_id = model_id or os.environ.get("PADDLEOCR_VL_MODEL", DEFAULT_MODEL)
+        try:
+            self._rep_penalty = float(os.environ.get("PADDLEOCR_VL_REPETITION_PENALTY", "1.05"))
+        except ValueError:
+            self._rep_penalty = 1.05
         # Loaded once and kept resident — reloading per frame would dominate runtime.
         self._model, self._processor = load(self.model_id)
         self._config = load_config(self.model_id)
@@ -63,15 +92,20 @@ class PaddleOCRVLBackend(OCRBackend):
                 path = f.name
             pil.save(path)
             prompt = self._apply_chat_template(self._processor, self._config, OCR_PROMPT, num_images=1)
-            result = self._generate(
-                self._model,
-                self._processor,
-                prompt,
-                image=[path],
-                max_tokens=256,
-                temperature=0.0,
-                verbose=False,
-            )
+            # Anti-hallucination knobs: greedy decode (temp 0), a tight token budget
+            # (subtitle bands are short — long output is almost always a loop), and a
+            # mild repetition penalty. The penalty kwarg name varies across mlx_vlm
+            # versions, so it's applied opportunistically and dropped if unsupported.
+            gen_kwargs = dict(max_tokens=96, temperature=0.0, verbose=False)
+            try:
+                result = self._generate(
+                    self._model, self._processor, prompt, image=[path],
+                    repetition_penalty=self._rep_penalty, **gen_kwargs,
+                )
+            except TypeError:
+                result = self._generate(
+                    self._model, self._processor, prompt, image=[path], **gen_kwargs,
+                )
         finally:
             if path:
                 try:
@@ -81,7 +115,7 @@ class PaddleOCRVLBackend(OCRBackend):
 
         text = getattr(result, "text", result)
         text = (text or "").strip()
-        if not text:
+        if not text or _is_degenerate(text):
             return []
         h, w = image.shape[:2]
         # The VLM gives no per-line box/confidence; the crop IS the line region.

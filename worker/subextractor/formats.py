@@ -1,7 +1,7 @@
-"""Subtitle file writers: SRT and ASS.
+"""Subtitle file writers: SRT, ASS and WebVTT.
 
 ASS is the richer master format — it carries the \\an alignment recovered from
-the OCR bounding box. SRT is the plain timed-text down-conversion.
+the OCR bounding box. SRT and WebVTT are plain timed-text down-conversions.
 """
 from __future__ import annotations
 
@@ -16,6 +16,11 @@ def _srt_time(t: float) -> str:
     m, ms = divmod(ms, 60_000)
     s, ms = divmod(ms, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _vtt_time(t: float) -> str:
+    # WebVTT uses a dot for the millisecond separator (HH:MM:SS.mmm).
+    return _srt_time(t).replace(",", ".")
 
 
 def _ass_time(t: float) -> str:
@@ -33,6 +38,13 @@ def write_srt(cues: list[Cue], path: str) -> None:
         for i, c in enumerate(cues, start=1):
             text = c.text.replace("\n", "\n")
             fh.write(f"{i}\n{_srt_time(c.start)} --> {_srt_time(c.end)}\n{text}\n\n")
+
+
+def write_vtt(cues: list[Cue], path: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("WEBVTT\n\n")
+        for i, c in enumerate(cues, start=1):
+            fh.write(f"{i}\n{_vtt_time(c.start)} --> {_vtt_time(c.end)}\n{c.text}\n\n")
 
 
 def write_ass(cues: list[Cue], path: str, width: int, height: int, fontsize: int = 0) -> None:

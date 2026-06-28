@@ -49,7 +49,6 @@ are merged into one ASS with `\an` alignment from each zone's position.
 api/      Go API (chi) — auth, jobs, storage, SSE, /internal worker protocol
 worker/   Python OCR worker (shared pipeline; macOS + NVIDIA backends)
 web/      React + Vite frontend (subtitle editor)
-graphify-out/  knowledge graph of the codebase (see CLAUDE.md)
 ```
 
 ## Quick start (dev)
@@ -74,3 +73,9 @@ The API runs database migrations automatically on startup.
 - **DB:** PostgreSQL 16
 - **Worker:** Python — ffmpeg + RapidOCR / PP-OCRv5 / PaddleOCR-VL (configurable)
 - **Frontend:** React + Vite + TypeScript; ass-compiler, JASSUB, wavesurfer.js
+
+## License
+
+Licensed under the **GNU Affero General Public License v3.0 or later** (AGPL-3.0) —
+see [LICENSE](LICENSE). If you run a modified version to provide a network service,
+the AGPL requires you to offer your modified source to its users.

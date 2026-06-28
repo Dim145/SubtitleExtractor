@@ -1,18 +1,27 @@
-"""Frame de-duplication and merging into timed subtitle cues.
+"""Frame change detection and merging OCR frames into timed subtitle cues.
 
-Two techniques carry the timing accuracy (per the design research):
-  * SSIM frame-skip: near-identical consecutive bands reuse the prior OCR result.
-  * Levenshtein-ratio merge: consecutive frames with similar text collapse into
-    one cue with a start/end, and tiny gaps between identical cues are bridged.
+Recall + precision techniques (per the design research):
+  * Change detection on a high-contrast TEXT MASK (not raw SSIM) — reacts to text
+    changes even when the background moves, and skips when text is unchanged.
+  * Text-presence gate — skip OCR on bands with no text-like content (kills VLM
+    hallucinations on empty frames, saves compute).
+  * Post-merge filters — minimum persistence (frames) + duration, and a junk
+    filter dropping pure-digit/punctuation flickers.
+  * Majority vote — a cue's text is the most frequent reading across its frames.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from collections import Counter
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 from rapidfuzz import fuzz
-from skimage.metrics import structural_similarity
+
+# Pure digits / punctuation up to 3 chars → almost always hallucination junk.
+_JUNK_RE = re.compile(r"^[\W\d_]{1,3}$")
+_HAS_LETTER = re.compile(r"[^\W\d_]")
 
 
 @dataclass
@@ -21,16 +30,41 @@ class Cue:
     end: float
     text: str
     an: int  # ASS alignment 1-9
+    frames: int = 1
 
 
-def ssim_similar(gray_a: np.ndarray, gray_b: np.ndarray, threshold: float = 0.92) -> bool:
-    """True when two grayscale bands are structurally near-identical."""
-    if gray_a.shape != gray_b.shape:
-        gray_b = cv2.resize(gray_b, (gray_a.shape[1], gray_a.shape[0]))
-    if gray_a.size == 0:
-        return False
-    score = structural_similarity(gray_a, gray_b)
-    return score >= threshold
+def text_mask(gray: np.ndarray) -> np.ndarray:
+    """Binary mask of bright (subtitle) pixels — isolates text from background."""
+    return cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)[1]
+
+
+def text_presence(gray: np.ndarray) -> float:
+    """Edge-density score (0..1) as a cheap text-presence signal."""
+    if gray.size == 0:
+        return 0.0
+    edges = cv2.Canny(gray, 80, 200)
+    return float(np.count_nonzero(edges)) / edges.size
+
+
+def mask_diff_ratio(a: np.ndarray, b: np.ndarray) -> float:
+    """Fraction of differing pixels between two text masks (0..1)."""
+    if a.shape != b.shape:
+        b = cv2.resize(b, (a.shape[1], a.shape[0]))
+    return float(np.count_nonzero(cv2.absdiff(a, b))) / max(1, a.size)
+
+
+def is_junk(text: str) -> bool:
+    """True for cue text that is empty / pure short digits-punctuation."""
+    t = re.sub(r"\s+", "", text)
+    if not t:
+        return True
+    if len(t) <= 1:
+        # A single-glyph cue ("D", "1") is virtually always an OCR misfire.
+        return True
+    if _JUNK_RE.match(t):
+        return True
+    # No letters at all and very short → junk (e.g. "11", "0:0").
+    return _HAS_LETTER.search(t) is None and len(t) <= 3
 
 
 def alignment_from_bbox(
@@ -44,21 +78,17 @@ def alignment_from_bbox(
     x1, y1, x2, y2 = bbox
     cx = crop_x + (x1 + x2) / 2
     cy = crop_y + (y1 + y2) / 2
-
-    if cx < full_w / 3:
-        col = 0  # left
-    elif cx < 2 * full_w / 3:
-        col = 1  # center
-    else:
-        col = 2  # right
-
-    if cy < full_h / 3:
-        base = 7  # top row: 7,8,9
-    elif cy < 2 * full_h / 3:
-        base = 4  # middle row: 4,5,6
-    else:
-        base = 1  # bottom row: 1,2,3
+    col = 0 if cx < full_w / 3 else (1 if cx < 2 * full_w / 3 else 2)
+    base = 7 if cy < full_h / 3 else (4 if cy < 2 * full_h / 3 else 1)
     return base + col
+
+
+@dataclass
+class _Group:
+    start: float
+    end: float
+    an: int
+    texts: list[str] = field(default_factory=list)
 
 
 def merge_into_cues(
@@ -66,35 +96,47 @@ def merge_into_cues(
     frame_interval: float,
     sim_threshold: float = 80.0,
     min_gap: float = 0.4,
+    min_duration: float = 0.4,
+    min_frames: int = 2,
+    drop_junk: bool = True,
 ) -> list[Cue]:
-    """Collapse per-frame (timestamp, text, alignment) samples into timed cues."""
-    cues: list[Cue] = []
-    cur: Cue | None = None
+    """Collapse per-frame (timestamp, text, alignment) samples into timed cues,
+    then apply persistence/duration/junk filters and majority-vote the text."""
+    groups: list[_Group] = []
+    cur: _Group | None = None
 
     for ts, text, an in samples:
         t = text.strip()
         if not t:
             if cur is not None:
                 cur.end = ts
-                cues.append(cur)
+                groups.append(cur)
                 cur = None
             continue
-        if cur is not None and fuzz.ratio(t, cur.text) >= sim_threshold:
+        if cur is not None and fuzz.ratio(t, cur.texts[-1]) >= sim_threshold:
             cur.end = ts
-            # Prefer the longer reading — usually the more complete OCR.
-            if len(t) > len(cur.text):
-                cur.text = t
-                cur.an = an
+            cur.texts.append(t)
         else:
             if cur is not None:
-                cues.append(cur)
-            cur = Cue(start=ts, end=ts, text=t, an=an)
+                groups.append(cur)
+            cur = _Group(start=ts, end=ts, an=an, texts=[t])
     if cur is not None:
-        cues.append(cur)
+        groups.append(cur)
 
-    # Show the last contributing frame for one interval.
-    for c in cues:
-        c.end += frame_interval
+    cues: list[Cue] = []
+    for g in groups:
+        end = g.end + frame_interval
+        frames = len(g.texts)
+        # Verification: a cue's text is the most frequent reading across frames.
+        text = Counter(g.texts).most_common(1)[0][0]
+        # Persistence + duration + junk filters.
+        if frames < min_frames:
+            continue
+        if end - g.start < min_duration:
+            continue
+        if drop_junk and is_junk(text):
+            continue
+        cues.append(Cue(start=g.start, end=end, text=text, an=g.an, frames=frames))
 
     # Bridge tiny gaps between consecutive near-identical cues.
     merged: list[Cue] = []
@@ -105,6 +147,7 @@ def merge_into_cues(
             and c.start - merged[-1].end <= min_gap
         ):
             merged[-1].end = c.end
+            merged[-1].frames += c.frames
         else:
             merged.append(c)
     return merged
