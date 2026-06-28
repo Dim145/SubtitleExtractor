@@ -49,7 +49,9 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
         if (cv) { cv.width = dec.width; cv.height = dec.height; cv.getContext("2d")?.drawImage(bmp, 0, 0); }
         setReady(true);
       } catch (e) {
-        if (!stop) { setPreviewErr(e instanceof Error ? e.message : "Couldn't decode this file."); setReady(true); }
+        console.error("[ZonePicker] frame decode failed:", e);
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : String(e);
+        if (!stop) { setPreviewErr(msg || "Couldn't decode this file."); setReady(true); }
       } finally {
         dec?.destroy();
       }
