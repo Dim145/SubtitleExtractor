@@ -102,18 +102,17 @@ func (o *OIDC) Exchange(ctx context.Context, code, nonce, pkceVerifier string) (
 	return c, nil
 }
 
-// evalAdmin maps a configured claim to admin status.
+// evalAdmin maps a configured claim to admin status. Admin mapping is only
+// active when BOTH the claim name and the required value are configured; if
+// either is empty the mapping is disabled (no one is granted admin via OIDC),
+// so a misconfiguration cannot silently promote every authenticated user.
 func (o *OIDC) evalAdmin(raw map[string]any) bool {
-	if o.adminClaim == "" {
+	if o.adminClaim == "" || o.adminClaimValue == "" {
 		return false
 	}
 	val, ok := raw[o.adminClaim]
 	if !ok {
 		return false
-	}
-	// If no specific value is required, presence of the claim is enough.
-	if o.adminClaimValue == "" {
-		return true
 	}
 	switch v := val.(type) {
 	case string:

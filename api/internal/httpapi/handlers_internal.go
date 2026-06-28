@@ -103,6 +103,39 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// workerID returns the identity the worker presents on /internal calls. It
+// mirrors the fallback used in handleClaim so the value matches the job's
+// claimed_by column set at claim time.
+func workerID(r *http.Request) string {
+	return r.Header.Get("X-Worker-Id")
+}
+
+// bindWorker verifies that the job in the URL exists and is owned by the worker
+// making the request (i.e. the worker that claimed it). It writes the
+// appropriate error response and returns ok=false when the call should be
+// rejected. This stops one worker from mutating another worker's job by id.
+func (s *Server) bindWorker(w http.ResponseWriter, r *http.Request, id string) bool {
+	job, err := s.jobs.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return false
+	}
+	// claimed_by is set to the worker's X-Worker-Id at claim time. If the job
+	// has not been claimed, no worker may post against it.
+	if job.ClaimedBy == nil {
+		writeError(w, http.StatusConflict, "job is not claimed")
+		return false
+	}
+	// When the caller sends an identity, it must match the claiming worker.
+	// (Older workers that omit the header still can't target an *unclaimed*
+	// job thanks to the check above; a real worker always sends its id.)
+	if wid := workerID(r); wid != "" && wid != *job.ClaimedBy {
+		writeError(w, http.StatusForbidden, "job claimed by another worker")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var body struct {
@@ -111,6 +144,9 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		Log   string `json:"log"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !s.bindWorker(w, r, id) {
 		return
 	}
 	// Tell the worker to abort if the job was canceled or deleted.
@@ -132,6 +168,9 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if !s.bindWorker(w, r, id) {
+		return
+	}
 	if s.jobs.IsCanceled(r.Context(), id) {
 		writeError(w, http.StatusConflict, "job canceled")
 		return
@@ -152,6 +191,9 @@ func (s *Server) handleInternalLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
+	if !s.bindWorker(w, r, id) {
+		return
+	}
 	if err := s.jobs.AppendLog(r.Context(), id, body.Level, body.Message); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to append log")
 		return
@@ -164,8 +206,7 @@ func (s *Server) handleInternalLog(w http.ResponseWriter, r *http.Request) {
 // language, sha256 + the file part) and records it against the job.
 func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
-	if _, err := s.jobs.Get(r.Context(), jobID); err != nil {
-		writeError(w, http.StatusNotFound, "job not found")
+	if !s.bindWorker(w, r, jobID) {
 		return
 	}
 
@@ -235,6 +276,9 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := chi.URLParam(r, "id")
+	if !s.bindWorker(w, r, jobID) {
+		return
+	}
 	if err := s.jobs.Complete(r.Context(), jobID, body.Status == "success", body.Error); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to complete job")
 		return

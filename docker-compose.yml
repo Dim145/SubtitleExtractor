@@ -6,29 +6,35 @@
 
 services:
   postgres:
+    # Pinned to the 16.x line on purpose: bumping the Postgres MAJOR version
+    # requires a data migration (pg_upgrade / dump+restore) of the pgdata
+    # volume, so do NOT change this to 17/18 without one.
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-subext}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-subext}
-      POSTGRES_DB: ${POSTGRES_DB:-subext}
+      # No fallbacks: a missing .env must abort rather than boot with known creds.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-subext} -d ${POSTGRES_DB:-subext}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    # Pinned off :latest for reproducible deploys (current stable release tag).
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # No fallbacks: a missing .env must abort rather than boot with known creds.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
     volumes:
       - miniodata:/data
     ports:
@@ -43,13 +49,14 @@ services:
 
   # One-shot: create the bucket on first boot so the S3 backend works out of the box.
   createbuckets:
-    image: minio/mc:latest
+    # Pinned off :latest for reproducible deploys (current stable release tag).
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env} ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env};
       mc mb --ignore-existing local/${STORAGE_S3_BUCKET:-subext};
       exit 0;
       "
@@ -65,7 +72,7 @@ services:
     env_file: .env
     environment:
       # Override host-specific values so the container reaches sibling services.
-      DATABASE_URL: postgres://${POSTGRES_USER:-subext}:${POSTGRES_PASSWORD:-subext}@postgres:5432/${POSTGRES_DB:-subext}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy

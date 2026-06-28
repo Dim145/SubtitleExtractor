@@ -3,10 +3,12 @@ package httpapi
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/go-chi/httprate"
 
 	"subtitleextractor/internal/auth"
 	"subtitleextractor/internal/config"
@@ -65,8 +67,12 @@ func (s *Server) Router() http.Handler {
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
 			r.Get("/config", s.handleAuthConfig)
-			r.Post("/register", s.handleRegister)
-			r.Post("/login", s.handleLogin)
+			// Throttle credential endpoints per client IP to blunt brute-force /
+			// account-enumeration attempts. RealIP (above) normalizes RemoteAddr
+			// from X-Forwarded-For/X-Real-IP, so LimitByIP keys off the true client.
+			authLimit := httprate.LimitByIP(10, time.Minute)
+			r.With(authLimit).Post("/register", s.handleRegister)
+			r.With(authLimit).Post("/login", s.handleLogin)
 			r.Post("/logout", s.handleLogout)
 			r.With(s.authn.RequireAuth).Get("/me", s.handleMe)
 			r.With(s.authn.RequireAuth).Patch("/me", s.handleUpdateProfile)
