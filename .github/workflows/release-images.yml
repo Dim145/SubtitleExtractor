@@ -77,3 +77,38 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  # Package the native macOS worker as a ready-to-run zip and attach it to the
+  # release. Download → unzip → set .env → ./run.sh.
+  package-macos-worker:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to upload the release asset
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build worker zip
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          NAME="subtitleextractor-worker-macos"
+          STAGE="dist/$NAME"
+          mkdir -p "$STAGE"
+          cp -r worker/subextractor "$STAGE/"
+          cp worker/pyproject.toml worker/run.sh worker/.env.example "$STAGE/"
+          cp worker/PACKAGE.md "$STAGE/README.md"
+          chmod +x "$STAGE/run.sh"
+          # Strip any stray bytecode/caches from the checkout.
+          find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+          ( cd dist && zip -r -q "../$NAME-$TAG.zip" "$NAME" )
+          ls -lh "$NAME-$TAG.zip"
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release upload "$TAG" "subtitleextractor-worker-macos-$TAG.zip" --clobber \
+            --repo "${{ github.repository }}"
