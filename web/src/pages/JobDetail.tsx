@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, APIError } from "../api/client";
 import type { Job, JobResult, LogEntry } from "../api/types";
 import { Card, ProgressBar, Spinner, StatusBadge } from "../components/ui";
-import { formatBytes, formatRelative } from "../lib/format";
+import { formatBytes, formatRelative, subtitleFilename } from "../lib/format";
 import { sameOriginApiUrl } from "../lib/url";
 
 const ACTIVE = new Set(["queued", "claimed", "running"]);
@@ -230,9 +230,16 @@ export function JobDetail() {
                     Edit
                   </Link>
                 )}
-                <a className="btn" href={sameOriginApiUrl(r.downloadUrl)} download>
-                  Download
-                </a>
+                {(() => {
+                  const name = subtitleFilename(job.sourceFilename, r.kind);
+                  const base = sameOriginApiUrl(r.downloadUrl);
+                  const href = base + (base.includes("?") ? "&" : "?") + "name=" + encodeURIComponent(name);
+                  return (
+                    <a className="btn" href={href} download={name}>
+                      Download
+                    </a>
+                  );
+                })()}
               </div>
             ))}
           </div>

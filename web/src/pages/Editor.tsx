@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "r
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { Spinner } from "../components/ui";
+import { subtitleFilename } from "../lib/format";
 import { sameOriginApiUrl } from "../lib/url";
 import { useWaveform } from "../editor/useWaveform";
 import {
@@ -79,12 +80,14 @@ export function Editor() {
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [videoName, setVideoName] = useState<string | null>(null);
 
   // ── load cues + video ──────────────────────────────────────────────────
   useEffect(() => {
     let stop = false;
     (async () => {
       try {
+        api.getJob(id).then((j) => { if (!stop) setVideoName(j.sourceFilename); }).catch(() => {});
         const results = await api.jobResults(id);
         const pick =
           results.find((r) => r.kind === "ass") ??
@@ -190,7 +193,7 @@ export function Editor() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `subtitles.${kind}`;
+    a.download = subtitleFilename(videoName, kind);
     a.click();
     URL.revokeObjectURL(url);
   }

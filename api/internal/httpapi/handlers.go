@@ -220,6 +220,14 @@ func (s *Server) handleLocalFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
+	// Optional friendly download name (e.g. "Movie.srt"). Only affects the saved
+	// filename, so it doesn't need to be signed; sanitize to strip any path and
+	// quotes before putting it in the header.
+	if raw := r.URL.Query().Get("name"); raw != "" {
+		name := strings.ReplaceAll(sanitizeFilename(raw), "\"", "")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
+	}
+
 	// Serve with range support when possible.
 	if rs, ok := rc.(io.ReadSeeker); ok {
 		http.ServeContent(w, r, key, time.Time{}, rs)

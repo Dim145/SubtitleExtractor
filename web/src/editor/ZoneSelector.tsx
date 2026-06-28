@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import type { Zone } from "../api/types";
 import { Spinner } from "../components/ui";
+import { subtitleFilename } from "../lib/format";
 import { FrameDecoder, webCodecsAvailable } from "./decodeFrame";
 import { toASS, toSRT, toVTT } from "./subtitles";
 
@@ -228,9 +229,9 @@ export function ZoneSelector({
           setClientStage(stage);
         },
       );
-      if (formats.includes("srt")) downloadText("subtitles.srt", toSRT(cues));
-      if (formats.includes("ass")) downloadText("subtitles.ass", toASS(cues, width, height));
-      if (formats.includes("vtt")) downloadText("subtitles.vtt", toVTT(cues));
+      if (formats.includes("srt")) downloadText(subtitleFilename(file.name, "srt"), toSRT(cues));
+      if (formats.includes("ass")) downloadText(subtitleFilename(file.name, "ass"), toASS(cues, width, height));
+      if (formats.includes("vtt")) downloadText(subtitleFilename(file.name, "vtt"), toVTT(cues));
       setClientStage(`done — ${cues.length} cues`);
     } catch (e) {
       console.error(e);

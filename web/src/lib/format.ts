@@ -1,3 +1,12 @@
+// Build a friendly subtitle download name: "<video base>.<ext>" (e.g.
+// "Movie.mkv" + "srt" → "Movie.srt"). Falls back to "subtitles" if unknown.
+export function subtitleFilename(videoName: string | null | undefined, ext: string): string {
+  const raw = (videoName || "").trim();
+  const dot = raw.lastIndexOf(".");
+  const base = (dot > 0 ? raw.slice(0, dot) : raw).trim() || "subtitles";
+  return `${base}.${ext}`;
+}
+
 export function formatBytes(n: number | null | undefined): string {
   if (!n && n !== 0) return "—";
   const units = ["B", "KB", "MB", "GB"];
