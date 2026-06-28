@@ -1,14 +1,16 @@
 import { Command } from "cmdk";
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { LayoutGrid, Pencil, Settings, Plus, SunMoon, Search } from "lucide-react";
+import { LayoutGrid, Pencil, Settings, Plus, SunMoon, Search, LogOut } from "lucide-react";
 import { useTheme } from "@/lib/theme";
+import { useLogout } from "@/api/auth";
 
 /** ⌘K command palette: navigation + quick actions. */
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const toggleTheme = useTheme((s) => s.toggle);
+  const logout = useLogout();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -62,6 +64,7 @@ export function CommandPalette() {
             <Command.Group heading="Actions" className="px-1 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-faint [&_[cmdk-group-items]]:mt-1">
               <Item onSelect={() => run(() => navigate({ to: "/" }))} icon={<Plus className="size-4" />}>New extraction</Item>
               <Item onSelect={() => run(toggleTheme)} icon={<SunMoon className="size-4" />}>Toggle theme</Item>
+              <Item onSelect={() => run(() => logout.mutate(undefined, { onSuccess: () => navigate({ to: "/login" }) }))} icon={<LogOut className="size-4" />}>Sign out</Item>
             </Command.Group>
           </Command.List>
         </div>
