@@ -31,11 +31,11 @@ function jsonReq(method: string, data: unknown): RequestInit {
 }
 
 export interface WorkerAvailability {
-  available: boolean;
-  reason?: string;
-  workers: number;
+  total: number;
   online: number;
+  busy: number;
   idle: number;
+  available: boolean;
 }
 
 export const api = {

@@ -1,7 +1,8 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { RootLayout } from "@/app/RootLayout";
 import { Login } from "@/routes/Login";
-import { Admin, Dashboard, Editor, JobDetail } from "@/routes/stubs";
+import { Dashboard } from "@/routes/Dashboard";
+import { Admin, Editor, JobDetail } from "@/routes/stubs";
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
