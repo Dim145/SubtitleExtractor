@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Captions, Moon, Sun } from "lucide-react";
 import { CommandPalette } from "@/app/CommandPalette";
+import { ProfileMenu } from "@/app/ProfileMenu";
 import { useMe } from "@/api/auth";
 import { useTheme } from "@/lib/theme";
 import { Spinner } from "@/components/ui/spinner";
@@ -10,13 +11,6 @@ const NAV = [
   { to: "/", label: "Dashboard" },
   { to: "/admin", label: "Admin" },
 ] as const;
-
-function initials(name: string, email: string): string {
-  const base = (name || email || "?").trim();
-  const parts = base.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return base.slice(0, 2).toUpperCase();
-}
 
 export function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -70,12 +64,7 @@ export function RootLayout() {
         >
           {theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}
         </button>
-        <div
-          title={me.email}
-          className="grid size-8 place-items-center rounded-full bg-gradient-to-br from-amber to-accent text-xs font-bold text-[#06121a]"
-        >
-          {initials(me.displayName, me.email)}
-        </div>
+        <ProfileMenu />
       </header>
 
       <main className="min-h-[calc(100%-3.5rem)]">

@@ -39,6 +39,14 @@ export function useRegister() {
   });
 }
 
+export function useUpdateProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.updateProfile,
+    onSuccess: (u: User) => qc.setQueryData(["me"], u),
+  });
+}
+
 export function useLogout() {
   const qc = useQueryClient();
   return useMutation({

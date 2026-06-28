@@ -111,6 +111,19 @@ func (r *Repo) List(ctx context.Context) ([]*User, error) {
 	return out, rows.Err()
 }
 
+// UpdateProfile changes a user's display name and email (local accounts).
+func (r *Repo) UpdateProfile(ctx context.Context, id, displayName, email string) (*User, error) {
+	return scanUser(r.pool.QueryRow(ctx, `
+		UPDATE users SET display_name=$2, email=$3 WHERE id=$1
+		RETURNING `+selectColumns, id, displayName, email))
+}
+
+// SetPassword updates a user's password hash (local accounts).
+func (r *Repo) SetPassword(ctx context.Context, id, passwordHash string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE users SET password_hash=$2 WHERE id=$1`, id, passwordHash)
+	return err
+}
+
 // SetAdmin grants or revokes admin on a user.
 func (r *Repo) SetAdmin(ctx context.Context, id string, isAdmin bool) error {
 	_, err := r.pool.Exec(ctx, `UPDATE users SET is_admin=$2 WHERE id=$1`, id, isAdmin)

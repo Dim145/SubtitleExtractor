@@ -47,6 +47,8 @@ export const api = {
   register: (d: { email: string; password: string; displayName?: string }) =>
     request<User>("/api/auth/register", jsonReq("POST", d)),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  updateProfile: (d: { displayName?: string; email?: string; password?: string; currentPassword?: string }) =>
+    request<User>("/api/auth/me", jsonReq("PATCH", d)),
   oidcLoginUrl: "/api/auth/oidc/login",
 
   // ---- jobs ----

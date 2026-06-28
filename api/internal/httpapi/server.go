@@ -69,6 +69,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/login", s.handleLogin)
 			r.Post("/logout", s.handleLogout)
 			r.With(s.authn.RequireAuth).Get("/me", s.handleMe)
+			r.With(s.authn.RequireAuth).Patch("/me", s.handleUpdateProfile)
 
 			if s.oidc != nil {
 				r.Get("/oidc/login", s.handleOIDCLogin)

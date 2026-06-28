@@ -134,6 +134,89 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, u)
 }
 
+// handleUpdateProfile lets a local user edit their own display name, email and
+// password. OIDC accounts are managed by the identity provider and rejected.
+// Changing the email or password requires the current password.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if u.Provider != "local" || u.PasswordHash == nil {
+		writeError(w, http.StatusForbidden, "your profile is managed by your SSO provider")
+		return
+	}
+	var body struct {
+		DisplayName     *string `json:"displayName"`
+		Email           *string `json:"email"`
+		Password        *string `json:"password"`
+		CurrentPassword string  `json:"currentPassword"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+
+	newName, newEmail := u.DisplayName, u.Email
+	if body.DisplayName != nil {
+		newName = strings.TrimSpace(*body.DisplayName)
+	}
+	emailChange := false
+	if body.Email != nil {
+		e := strings.TrimSpace(strings.ToLower(*body.Email))
+		if e == "" {
+			writeError(w, http.StatusBadRequest, "email cannot be empty")
+			return
+		}
+		if e != u.Email {
+			emailChange = true
+			newEmail = e
+		}
+	}
+	pwChange := body.Password != nil && *body.Password != ""
+
+	// Sensitive changes require re-entering the current password.
+	if emailChange || pwChange {
+		ok, err := auth.VerifyPassword(body.CurrentPassword, *u.PasswordHash)
+		if err != nil || !ok {
+			writeError(w, http.StatusForbidden, "current password is incorrect")
+			return
+		}
+	}
+	if emailChange {
+		if _, err := s.users.GetByEmail(r.Context(), newEmail); err == nil {
+			writeError(w, http.StatusConflict, "that email is already in use")
+			return
+		}
+	}
+	if pwChange && len(*body.Password) < 8 {
+		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+
+	if _, err := s.users.UpdateProfile(r.Context(), u.ID, newName, newEmail); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update profile")
+		return
+	}
+	if pwChange {
+		hash, err := auth.HashPassword(*body.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to hash password")
+			return
+		}
+		if err := s.users.SetPassword(r.Context(), u.ID, hash); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update password")
+			return
+		}
+	}
+	updated, err := s.users.GetByID(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reload profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 // --- OIDC flow -----------------------------------------------------------
 
 const (
