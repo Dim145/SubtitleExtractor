@@ -55,6 +55,9 @@ export const api = {
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   jobLogs: (id: string) => request<LogEntry[]>(`/api/jobs/${id}/logs`),
   jobResults: (id: string) => request<JobResult[]>(`/api/jobs/${id}/results`),
+  // Returns a (presigned) URL to the source video — NOT the bytes. Caller must
+  // use `.url` as the media source (see sameOriginApiUrl for local storage).
+  jobVideo: (id: string) => request<{ url: string; filename: string }>(`/api/jobs/${id}/video`),
   cancelJob: (id: string) => request<void>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: "DELETE" }),
   createJob: (form: FormData) => request<Job>("/api/jobs", { method: "POST", body: form }),

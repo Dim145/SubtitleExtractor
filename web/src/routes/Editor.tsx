@@ -37,6 +37,9 @@ export function Editor() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [videoError, setVideoError] = useState(false);
+  // The /video endpoint returns JSON {url} (presigned), not the bytes. Resolve it
+  // to a usable media URL once, then drive both <video> and the frames decoder.
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
 
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
@@ -72,6 +75,24 @@ export function Editor() {
     return () => { stop = true; };
   }, [id]);
 
+  // ---- resolve the source video URL (JSON {url} → usable media URL) ----
+  useEffect(() => {
+    let stop = false;
+    setMediaUrl(null);
+    setVideoError(false);
+    setFramesMode(false);
+    setFramesError(false);
+    (async () => {
+      try {
+        const info = await api.jobVideo(id);
+        if (!stop) setMediaUrl(sameOriginApiUrl(info.url));
+      } catch {
+        if (!stop) setFramesError(true); // no source at all → graceful "unavailable" fallback
+      }
+    })();
+    return () => { stop = true; };
+  }, [id]);
+
   const onUpdate = useCallback((cid: string, start: number, end: number) => {
     setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, start, end } : c)));
     setDirty(true);
@@ -92,11 +113,11 @@ export function Editor() {
   // On native playback failure, fall back to decoding frames with WebCodecs.
   useEffect(() => { if (videoError) setFramesMode(true); }, [videoError]);
   useEffect(() => {
-    if (!framesMode) return;
+    if (!framesMode || !mediaUrl) return;
     let stop = false;
     (async () => {
       try {
-        const blob = await fetch(`/api/jobs/${id}/video`, { credentials: "include" }).then((r) => r.blob());
+        const blob = await fetch(mediaUrl, { credentials: "include" }).then((r) => r.blob());
         if (blob.type.includes("json") || blob.size < 1024) throw new Error("source video unavailable");
         const { FrameDecoder } = await import("@/editor/decodeFrame");
         const dec = new FrameDecoder();
@@ -108,7 +129,7 @@ export function Editor() {
       } catch { if (!stop) setFramesError(true); }
     })();
     return () => { stop = true; };
-  }, [framesMode, id, drawFrame]);
+  }, [framesMode, mediaUrl, drawFrame]);
 
   const wave = useWaveform({
     media: framesMode ? null : videoEl, container: waveEl, cues, selectedId,
@@ -170,8 +191,6 @@ export function Editor() {
     return () => document.removeEventListener("keydown", onKey);
   }, [wave, selectedId, cues, currentTime, seek]);
 
-  const videoSrc = `/api/jobs/${id}/video`;
-
   return (
     <div className="mx-auto max-w-[1180px] px-5 py-6">
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -212,7 +231,7 @@ export function Editor() {
             <div className="relative aspect-video bg-black">
               <video
                 ref={setVideoEl}
-                src={videoSrc}
+                src={mediaUrl ?? undefined}
                 className="size-full"
                 onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                 onPlay={() => setPlaying(true)}
