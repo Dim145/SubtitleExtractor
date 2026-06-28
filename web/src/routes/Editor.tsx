@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Plus, Trash2, Save, Download, Check } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, Download, Check, X } from "lucide-react";
 import { useJob } from "@/api/jobs";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -222,8 +222,8 @@ export function Editor() {
 
           {/* cue table */}
           <div className="flex max-h-[560px] flex-col">
-            <div className="grid grid-cols-[28px_88px_1fr] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint">
-              <span>#</span><span>Time</span><span>Text</span>
+            <div className="grid grid-cols-[28px_88px_1fr_32px] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint">
+              <span>#</span><span>Time</span><span>Text</span><span />
             </div>
             <div ref={cueListRef} className="overflow-auto">
               {loading ? (
@@ -237,7 +237,7 @@ export function Editor() {
                     data-cue={c.id}
                     onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
                     className={cn(
-                      "grid cursor-pointer grid-cols-[28px_88px_1fr] gap-2 border-b border-border px-3 py-2 text-sm",
+                      "grid cursor-pointer grid-cols-[28px_88px_1fr_32px] gap-2 border-b border-border px-3 py-2 text-sm",
                       c.id === activeId && "bg-amber/10",
                       c.id === selectedId ? "bg-accent/10 shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-surface-2",
                     )}
@@ -261,6 +261,11 @@ export function Editor() {
                       onChange={(e) => patch(c.id, { text: e.target.value })}
                       className="resize-none rounded border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-snug hover:border-border focus:border-accent focus:bg-surface-2"
                     />
+                    <button
+                      type="button" title="Delete cue"
+                      onClick={(e) => { e.stopPropagation(); delCue(c.id); }}
+                      className="grid size-6 self-start place-items-center rounded text-faint transition hover:bg-err/15 hover:text-err"
+                    ><X className="size-4" /></button>
                   </div>
                 ))
               )}
