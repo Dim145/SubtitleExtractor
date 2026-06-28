@@ -15,7 +15,8 @@ const button = cva(
       size: {
         md: "h-9 px-4 text-sm",
         sm: "h-8 px-3 text-[13px]",
-        icon: "h-9 w-9",
+        // ~40px touch target on small screens, trimmed to 36px on desktop.
+        icon: "size-10 sm:size-9",
       },
     },
     defaultVariants: { variant: "default", size: "md" },

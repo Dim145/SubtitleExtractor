@@ -6,6 +6,7 @@ import { APIError } from "@/api/client";
 import type { User } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useDialog } from "@/components/ui/useDialog";
 import { cn } from "@/lib/cn";
 
 function initials(name: string, email: string): string {
@@ -95,6 +96,7 @@ const labelCls = "grid gap-1.5 text-sm";
 const spanCls = "text-xs font-medium text-muted";
 
 function ProfileModal({ me, onClose }: { me: User; onClose: () => void }) {
+  const dlg = useDialog<HTMLDivElement>(onClose);
   const upd = useUpdateProfile();
   const oidc = me.provider !== "local";
   const [displayName, setDisplayName] = useState(me.displayName);
@@ -125,11 +127,11 @@ function ProfileModal({ me, onClose }: { me: User; onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="animate-in w-full max-w-md rounded-2xl border border-border-strong bg-surface p-5 shadow-2xl" style={{ animationDuration: "0.18s" }}>
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={dlg.onBackdropMouseDown}>
+      <div ref={dlg.ref} {...dlg.dialogProps} aria-label="Your profile" className="animate-in w-full max-w-md rounded-2xl border border-border-strong bg-surface p-5 shadow-2xl" style={{ animationDuration: "0.18s" }}>
         <div className="mb-4 flex items-center justify-between">
           <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Your profile</div>
-          <button onClick={onClose} className="grid size-7 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-text"><X className="size-4" /></button>
+          <button onClick={onClose} aria-label="Close" className="grid size-9 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-text sm:size-7"><X className="size-4" /></button>
         </div>
 
         {oidc ? (

@@ -22,6 +22,15 @@ type Tab = (typeof TABS)[number]["id"];
 const input = "h-9 w-full rounded-lg border border-border-strong bg-surface-2 px-3 text-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/25";
 const eyebrow = "text-[11px] font-bold uppercase tracking-[0.12em] text-faint";
 
+/** Parse a numeric input value, tolerating a comma decimal separator (locales
+ * like fr-FR). Returns null for blank/invalid so callers can keep the old value. */
+function parseDecimal(raw: string): number | null {
+  const v = raw.trim().replace(",", ".");
+  if (v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function Admin() {
   const [tab, setTab] = useState<Tab>("workers");
   return (
@@ -111,7 +120,7 @@ function WorkerConfig({ worker }: { worker: Worker }) {
             ) : f.type === "boolean" ? (
               <div className="pt-0.5"><Switch checked={Boolean(values[f.key])} onCheckedChange={(v) => set(f.key, v)} aria-label={f.label} /></div>
             ) : f.type === "number" ? (
-              <input type="number" className={input} min={f.min} max={f.max} step={f.step} value={String(values[f.key] ?? "")} onChange={(e) => set(f.key, e.target.value === "" ? "" : Number(e.target.value))} />
+              <input type="number" inputMode="decimal" className={input} min={f.min} max={f.max} step={f.step} value={String(values[f.key] ?? "")} onChange={(e) => { const n = parseDecimal(e.target.value); set(f.key, n ?? (e.target.value.trim() === "" ? "" : values[f.key])); }} />
             ) : (
               <input className={input} value={String(values[f.key] ?? "")} onChange={(e) => set(f.key, e.target.value)} />
             )}
@@ -241,8 +250,8 @@ function Settings() {
         <select className={input} value={form.defaultOcrBackend} onChange={(e) => upd({ defaultOcrBackend: e.target.value })}>
           <option value="">(worker default)</option><option value="rapidocr">RapidOCR</option><option value="ppocr">PP-OCR</option><option value="paddleocr_vl">PaddleOCR-VL</option>
         </select></label>
-      <label className="grid gap-1"><span className="text-xs font-medium text-muted">Default sample FPS</span><input className={input} type="number" min={0.5} step={0.5} value={form.defaultFps} onChange={(e) => upd({ defaultFps: Number(e.target.value) })} /></label>
-      <label className="grid gap-1"><span className="text-xs font-medium text-muted">Default min confidence</span><input className={input} type="number" min={0} max={1} step={0.05} value={form.defaultMinConfidence} onChange={(e) => upd({ defaultMinConfidence: Number(e.target.value) })} /></label>
+      <label className="grid gap-1"><span className="text-xs font-medium text-muted">Default sample FPS</span><input className={input} type="number" inputMode="decimal" min={0.5} step={0.5} value={form.defaultFps} onChange={(e) => { const n = parseDecimal(e.target.value); upd({ defaultFps: n ?? form.defaultFps }); }} /></label>
+      <label className="grid gap-1"><span className="text-xs font-medium text-muted">Default min confidence</span><input className={input} type="number" inputMode="decimal" min={0} max={1} step={0.05} value={form.defaultMinConfidence} onChange={(e) => { const n = parseDecimal(e.target.value); upd({ defaultMinConfidence: n ?? form.defaultMinConfidence }); }} /></label>
       <div className="flex items-center gap-3"><Button variant="primary" size="sm" type="submit" disabled={save.isPending}>Save settings</Button>{saved && <span className="text-xs text-ok">Saved.</span>}</div>
     </form>
   );

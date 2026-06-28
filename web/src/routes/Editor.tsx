@@ -16,6 +16,7 @@ import {
 import { sameOriginApiUrl } from "@/lib/url";
 import { subtitleFilename } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { useDialog } from "@/components/ui/useDialog";
 
 type Format = "ass" | "srt" | "vtt";
 
@@ -196,7 +197,9 @@ export function Editor() {
   ) : null;
 
   return (
-    <div className="mx-auto max-w-[1180px] px-5 py-6">
+    // key={id} force-remounts the editor body on job→job navigation so the
+    // player + waveform fully reset (no stale decoder / wavesurfer instance).
+    <div key={id} className="mx-auto max-w-[1180px] px-5 py-6">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Link to="/jobs/$id" params={{ id }}><Button variant="ghost" size="sm"><ArrowLeft className="size-4" /> Job</Button></Link>
@@ -249,14 +252,14 @@ export function Editor() {
                   </div>
                 </>
               ) : player.mode === "canvas" ? (
-                <div className="text-[11px] text-faint">Frame preview · audio waveform unavailable for this container</div>
+                <div className="text-xs text-muted">Frame preview · audio waveform unavailable for this container</div>
               ) : null}
             </div>
           </div>
 
           {/* cue table */}
           <div className="flex max-h-[560px] flex-col">
-            <div className="grid grid-cols-[28px_88px_1fr_32px] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint">
+            <div className="grid grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint sm:grid-cols-[28px_88px_1fr_32px]">
               <span>#</span><span>Time</span><span>Text</span><span />
             </div>
             <div ref={cueListRef} className="overflow-auto">
@@ -271,7 +274,7 @@ export function Editor() {
                     data-cue={c.id}
                     onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
                     className={cn(
-                      "grid cursor-pointer grid-cols-[28px_88px_1fr_32px] gap-2 border-b border-border px-3 py-2 text-sm",
+                      "grid cursor-pointer grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-sm sm:grid-cols-[28px_88px_1fr_32px]",
                       c.id === activeId && "bg-amber/10",
                       c.id === selectedId ? "bg-accent/10 shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-surface-2",
                     )}
@@ -280,13 +283,15 @@ export function Editor() {
                     <div className="grid gap-1" onClick={(e) => e.stopPropagation()}>
                       <input
                         defaultValue={displayTime(c.start)} key={`s-${c.id}-${c.start}`}
+                        inputMode="decimal" aria-label={`Cue ${i + 1} start time`}
                         onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { start: v }); }}
-                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11px] text-amber hover:border-border focus:border-accent focus:bg-surface-2"
+                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-amber hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
                       />
                       <input
                         defaultValue={displayTime(c.end)} key={`e-${c.id}-${c.end}`}
+                        inputMode="decimal" aria-label={`Cue ${i + 1} end time`}
                         onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { end: v }); }}
-                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11px] text-faint hover:border-border focus:border-accent focus:bg-surface-2"
+                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-faint hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
                       />
                     </div>
                     <textarea
@@ -296,9 +301,9 @@ export function Editor() {
                       className="resize-none rounded border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-snug hover:border-border focus:border-accent focus:bg-surface-2"
                     />
                     <button
-                      type="button" title="Delete cue"
+                      type="button" title="Delete cue" aria-label={`Delete cue ${i + 1}`}
                       onClick={(e) => { e.stopPropagation(); delCue(c.id); }}
-                      className="grid size-6 self-start place-items-center rounded text-faint transition hover:bg-err/15 hover:text-err"
+                      className="grid size-9 self-start place-items-center rounded text-faint transition hover:bg-err/15 hover:text-err sm:size-7"
                     ><X className="size-4" /></button>
                   </div>
                 ))
@@ -310,57 +315,83 @@ export function Editor() {
       <p className="mt-2 text-xs text-muted">Cue list, waveform and video stay in sync · Space play/pause · ← → seek 5s · [ / ] set in/out · ↑ ↓ select · edits aren’t saved until you hit Save.</p>
 
       {saveOpen && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) setSaveOpen(false); }}>
-          <div className="w-full max-w-md rounded-2xl border border-border-strong bg-surface p-5 shadow-2xl">
-            <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Save subtitles</div>
-            <label className="mt-3 block text-sm">
-              <span className="text-muted">File name</span>
-              <div className="mt-1 flex items-center gap-2">
-                <input
-                  autoFocus value={saveName} onChange={(e) => setSaveName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && saveName.trim()) doSave(); }}
-                  className="h-9 flex-1 rounded-lg border border-border-strong bg-surface-2 px-3 text-sm focus:border-accent"
-                />
-                <span className="font-mono text-sm text-faint">.{format}</span>
-              </div>
-            </label>
-
-            <div className="mt-4 grid gap-2">
-              <button
-                type="button" disabled={!sourceResultId} onClick={() => setSaveMode("overwrite")}
-                className={cn("flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left text-sm transition", saveMode === "overwrite" ? "border-accent bg-accent/10" : "border-border hover:border-border-strong", !sourceResultId && "cursor-not-allowed opacity-50")}
-              >
-                <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", saveMode === "overwrite" ? "border-accent" : "border-border-strong")}>
-                  {saveMode === "overwrite" && <span className="size-2 rounded-full bg-accent" />}
-                </span>
-                <span>
-                  <div className="font-medium">Overwrite current file</div>
-                  <div className="text-xs text-muted">Replaces {sourceResultName ? <span className="font-mono">{sourceResultName}</span> : "the file you opened"}.</div>
-                </span>
-              </button>
-              <button
-                type="button" onClick={() => setSaveMode("new")}
-                className={cn("flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left text-sm transition", saveMode === "new" ? "border-accent bg-accent/10" : "border-border hover:border-border-strong")}
-              >
-                <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", saveMode === "new" ? "border-accent" : "border-border-strong")}>
-                  {saveMode === "new" && <span className="size-2 rounded-full bg-accent" />}
-                </span>
-                <span>
-                  <div className="font-medium">Save as new file</div>
-                  <div className="text-xs text-muted">Adds a new subtitle file to this job.</div>
-                </span>
-              </button>
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <Button variant="default" size="sm" onClick={() => setSaveOpen(false)} disabled={saving}>Cancel</Button>
-              <Button variant="primary" size="sm" onClick={doSave} disabled={saving || !saveName.trim()}>
-                {saving ? <Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> : <Save className="size-3.5" />} Save
-              </Button>
-            </div>
-          </div>
-        </div>
+        <SaveDialog
+          format={format} saveName={saveName} setSaveName={setSaveName}
+          saveMode={saveMode} setSaveMode={setSaveMode}
+          sourceResultId={sourceResultId} sourceResultName={sourceResultName}
+          saving={saving} onSave={doSave} onClose={() => setSaveOpen(false)}
+        />
       )}
+    </div>
+  );
+}
+
+interface SaveDialogProps {
+  format: Format;
+  saveName: string;
+  setSaveName: (v: string) => void;
+  saveMode: "overwrite" | "new";
+  setSaveMode: (m: "overwrite" | "new") => void;
+  sourceResultId: string | null;
+  sourceResultName: string;
+  saving: boolean;
+  onSave: () => void;
+  onClose: () => void;
+}
+
+/** Accessible "Save subtitles" dialog (role/focus-trap/Esc via useDialog). */
+function SaveDialog(p: SaveDialogProps) {
+  const dlg = useDialog<HTMLDivElement>(p.onClose);
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={dlg.onBackdropMouseDown}>
+      <div ref={dlg.ref} {...dlg.dialogProps} aria-label="Save subtitles" className="w-full max-w-md rounded-2xl border border-border-strong bg-surface p-5 shadow-2xl">
+        <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Save subtitles</div>
+        <label className="mt-3 block text-sm">
+          <span className="text-muted">File name</span>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              autoFocus value={p.saveName} onChange={(e) => p.setSaveName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && p.saveName.trim()) p.onSave(); }}
+              className="h-9 flex-1 rounded-lg border border-border-strong bg-surface-2 px-3 text-sm focus:border-accent"
+            />
+            <span className="font-mono text-sm text-faint">.{p.format}</span>
+          </div>
+        </label>
+
+        <div className="mt-4 grid gap-2">
+          <button
+            type="button" disabled={!p.sourceResultId} onClick={() => p.setSaveMode("overwrite")}
+            className={cn("flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left text-sm transition", p.saveMode === "overwrite" ? "border-accent bg-accent/10" : "border-border hover:border-border-strong", !p.sourceResultId && "cursor-not-allowed opacity-50")}
+          >
+            <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", p.saveMode === "overwrite" ? "border-accent" : "border-border-strong")}>
+              {p.saveMode === "overwrite" && <span className="size-2 rounded-full bg-accent" />}
+            </span>
+            <span>
+              <div className="font-medium">Overwrite current file</div>
+              <div className="text-xs text-muted">Replaces {p.sourceResultName ? <span className="font-mono">{p.sourceResultName}</span> : "the file you opened"}.</div>
+            </span>
+          </button>
+          <button
+            type="button" onClick={() => p.setSaveMode("new")}
+            className={cn("flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left text-sm transition", p.saveMode === "new" ? "border-accent bg-accent/10" : "border-border hover:border-border-strong")}
+          >
+            <span className={cn("mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border", p.saveMode === "new" ? "border-accent" : "border-border-strong")}>
+              {p.saveMode === "new" && <span className="size-2 rounded-full bg-accent" />}
+            </span>
+            <span>
+              <div className="font-medium">Save as new file</div>
+              <div className="text-xs text-muted">Adds a new subtitle file to this job.</div>
+            </span>
+          </button>
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="default" size="sm" onClick={p.onClose} disabled={p.saving}>Cancel</Button>
+          <Button variant="primary" size="sm" onClick={p.onSave} disabled={p.saving || !p.saveName.trim()}>
+            {p.saving ? <Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> : <Save className="size-3.5" />} Save
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

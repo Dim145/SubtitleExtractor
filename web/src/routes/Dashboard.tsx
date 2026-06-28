@@ -4,6 +4,7 @@ import { UploadCloud, Plus, TriangleAlert, ChevronRight, Trash2, X, Pencil, Film
 import { useJobs, useWorkerAvailability, useCancelJob, useDeleteJob } from "@/api/jobs";
 import type { Job } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge, ProgressBar } from "@/components/StatusBadge";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -46,11 +47,13 @@ export function Dashboard() {
       )}
 
       <label
+        role="button" tabIndex={0} aria-label="Upload a video — drop a file or press Enter to browse"
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileRef.current?.click(); } }}
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
         onDrop={(e) => { e.preventDefault(); setDrag(false); setPickerFile(e.dataTransfer.files?.[0] ?? null); }}
         className={cn(
-          "animate-in group mb-6 grid cursor-pointer place-items-center rounded-xl border border-dashed border-border-strong bg-surface px-6 py-9 text-center transition-colors hover:border-accent/50",
+          "animate-in group mb-6 grid cursor-pointer place-items-center rounded-xl border border-dashed border-border-strong bg-surface px-6 py-9 text-center transition-colors hover:border-accent/50 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2",
           drag && "border-accent bg-accent/5",
         )}
       >
@@ -124,18 +127,27 @@ function JobRow({ job, index }: { job: Job; index: number }) {
       <StatusBadge status={job.status} />
       <div className="flex items-center gap-1" onClick={stop}>
         {job.status === "succeeded" && (
-          <Link to="/jobs/$id/editor" params={{ id: job.id }} title="Edit">
-            <Button variant="ghost" size="icon"><Pencil className="size-4" /></Button>
+          <Link to="/jobs/$id/editor" params={{ id: job.id }} title="Edit" aria-label="Edit subtitles">
+            <Button variant="ghost" size="icon" aria-label="Edit subtitles"><Pencil className="size-4" /></Button>
           </Link>
         )}
         {active && (
-          <Button variant="ghost" size="icon" title="Cancel" onClick={() => cancel.mutate(job.id)}><X className="size-4" /></Button>
+          <Button
+            variant="ghost" size="icon" aria-label="Cancel job"
+            title={cancel.isError ? "Cancel failed — try again" : "Cancel"}
+            disabled={cancel.isPending}
+            onClick={() => cancel.mutate(job.id)}
+          >{cancel.isPending ? <Spinner /> : <X className="size-4" />}</Button>
         )}
         {!active && (
-          <Button variant="ghost" size="icon" title="Delete" className="hover:text-err"
-                  onClick={() => del.mutate(job.id)}><Trash2 className="size-4" /></Button>
+          <Button
+            variant="ghost" size="icon" aria-label="Delete job" className="hover:text-err"
+            title={del.isError ? "Delete failed — try again" : "Delete"}
+            disabled={del.isPending}
+            onClick={() => del.mutate(job.id)}
+          >{del.isPending ? <Spinner /> : <Trash2 className="size-4" />}</Button>
         )}
-        <ChevronRight className="size-4 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-muted" />
+        <ChevronRight aria-hidden="true" className="size-4 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-muted" />
       </div>
     </div>
   );

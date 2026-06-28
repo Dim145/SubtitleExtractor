@@ -92,11 +92,12 @@ export function JobDetail() {
                       <span className="shrink-0 font-mono text-xs text-faint">{r.kind.toUpperCase()} · {formatBytes(r.byteSize)}</span>
                     </a>
                     <button
-                      type="button" title={isLast ? "Delete (removes the whole job)" : "Delete file"}
+                      type="button" aria-label={isLast ? "Delete file (removes the whole job)" : "Delete file"}
+                      title={isLast ? "Delete (removes the whole job)" : "Delete file"}
                       disabled={delResult.isPending}
                       onClick={() => removeResult(r.id, name, isLast)}
-                      className="grid size-7 shrink-0 place-items-center rounded-md text-faint transition hover:bg-err/15 hover:text-err disabled:opacity-50"
-                    ><Trash2 className="size-4" /></button>
+                      className="grid size-9 shrink-0 place-items-center rounded-md text-faint transition hover:bg-err/15 hover:text-err disabled:opacity-50 sm:size-7"
+                    >{delResult.isPending ? <Spinner /> : <Trash2 className="size-4" />}</button>
                   </div>
                 );
               })}

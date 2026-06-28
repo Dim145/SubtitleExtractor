@@ -60,7 +60,7 @@ export function RootLayout() {
         <button
           onClick={toggle}
           aria-label="Toggle theme"
-          className="grid size-9 place-items-center rounded-lg border border-border bg-surface-2 text-muted hover:border-border-strong hover:text-text"
+          className="grid size-10 place-items-center rounded-lg border border-border bg-surface-2 text-muted hover:border-border-strong hover:text-text sm:size-9"
         >
           {theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}
         </button>

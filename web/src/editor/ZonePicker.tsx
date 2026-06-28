@@ -7,6 +7,7 @@ import { webGpuAvailable, webCodecsAvailable } from "@/clientside/_caps";
 import type { Zone } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useDialog } from "@/components/ui/useDialog";
 import { subtitleFilename } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { loadZones, saveZones, loadLang, saveLang } from "@/lib/zonePrefs";
@@ -48,10 +49,23 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   const navigate = useNavigate();
   const create = useCreateJob();
   const stageRef = useRef<HTMLDivElement>(null);
+  const dlg = useDialog<HTMLDivElement>(onClose);
 
   const player = useSourcePlayer({ file });
   usePlayerHotkeys(player);
   const ready = player.mode === "video" || player.mode === "canvas";
+
+  // Re-render when the stage resizes so zone rectangles (read from clientWidth/
+  // clientHeight below) track the frame instead of drifting.
+  const [, setStageSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setStageSize({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    setStageSize({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, [ready]);
 
   // Zone layout is remembered across extractions (localStorage).
   const [zones, setZones] = useState<Zone[]>(loadZones);
@@ -121,20 +135,21 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
       <div className={`relative size-full rounded ${i === 0 ? "border-2 border-accent" : "border-2 border-amber"}`}>
         <span className={`absolute -top-2.5 left-1.5 rounded px-1.5 text-[9px] font-bold text-[#04181c] ${i === 0 ? "bg-accent" : "bg-amber"}`}>ZONE {i === 0 ? "A" : "B"}</span>
         <button onMouseDown={(e) => e.stopPropagation()} onClick={() => setZones((zs) => zs.filter((_, idx) => idx !== i))}
-          className="absolute -right-2 -top-2 z-20 grid size-5 place-items-center rounded-full bg-surface text-err shadow"><X className="size-3" /></button>
+          aria-label={`Remove zone ${i === 0 ? "A" : "B"}`}
+          className="absolute -right-2.5 -top-2.5 z-20 grid size-7 place-items-center rounded-full bg-surface text-err shadow sm:size-5"><X className="size-3" /></button>
       </div>
     </Rnd>
   )) : null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="my-6 w-full max-w-3xl rounded-2xl border border-border-strong bg-surface shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-4 backdrop-blur-sm" onMouseDown={dlg.onBackdropMouseDown}>
+      <div ref={dlg.ref} {...dlg.dialogProps} aria-label="New extraction" className="my-6 w-full max-w-3xl rounded-2xl border border-border-strong bg-surface shadow-2xl">
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
           <div className="min-w-0">
             <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">New extraction</div>
             <div className="truncate text-sm font-medium">{file.name}</div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose}><X className="size-4" /></Button>
+          <Button variant="ghost" size="icon" aria-label="Close" onClick={onClose}><X className="size-4" /></Button>
         </div>
 
         <div className="p-5">
