@@ -27,36 +27,61 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   const create = useCreateJob();
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
-  const [ready, setReady] = useState(false);
+  // Prefer a native <video> backdrop (works for MP4/WebM in every browser, no
+  // WASM). Only containers the browser can't play (MKV/HEVC) fall back to a
+  // WebCodecs-decoded still on a canvas — which needs Chrome/Safari (Firefox's
+  // WebCodecs can't decode H.264, mozbug 1918769).
+  const [mode, setMode] = useState<"loading" | "video" | "canvas" | "error">("loading");
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const ready = mode === "video" || mode === "canvas";
   const [zones, setZones] = useState<Zone[]>([{ x: 0.06, y: 0.7, w: 0.88, h: 0.22 }]);
   const [formats, setFormats] = useState<Set<Fmt>>(new Set<Fmt>(["srt", "ass"]));
   const [progress, setProgress] = useState<{ pct: number; stage: string } | null>(null);
 
-  // Decode one representative frame for the backdrop.
+  // Probe the file: native <video> first, WebCodecs fallback for MKV/HEVC.
   useEffect(() => {
-    let stop = false;
-    (async () => {
-      if (!webCodecsAvailable()) { setPreviewErr("This browser has no WebCodecs video decoder."); setReady(true); return; }
+    let cancelled = false;
+    const url = URL.createObjectURL(file);
+    setObjectUrl(url);
+    setMode("loading");
+    setPreviewErr(null);
+
+    const fallbackToWebCodecs = async () => {
+      if (cancelled) return;
+      if (!webCodecsAvailable()) { setPreviewErr("This browser has no WebCodecs video decoder."); setMode("error"); return; }
       let dec: import("@/editor/decodeFrame").FrameDecoder | null = null;
       try {
         const { FrameDecoder } = await import("@/editor/decodeFrame");
         dec = new FrameDecoder();
         const bmp = await dec.init(file); // init() decodes & returns a representative frame
-        if (stop) return;
-        const cv = canvasRef.current;
+        if (cancelled) return;
+        const cv = canvasRef.current; // always mounted, so the ref is ready
         if (cv) { cv.width = dec.width; cv.height = dec.height; cv.getContext("2d")?.drawImage(bmp, 0, 0); }
-        setReady(true);
+        setMode("canvas");
       } catch (e) {
-        console.error("[ZonePicker] frame decode failed:", e);
+        console.error("[ZonePicker] WebCodecs decode failed:", e);
         const msg = e instanceof Error ? `${e.name}: ${e.message}` : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : String(e);
-        if (!stop) { setPreviewErr(msg || "Couldn't decode this file."); setReady(true); }
+        if (!cancelled) { setPreviewErr(msg || "Couldn't decode this file."); setMode("error"); }
       } finally {
         dec?.destroy();
       }
-    })();
-    return () => { stop = true; };
+    };
+
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.muted = true;
+    probe.src = url;
+    probe.onloadedmetadata = () => {
+      if (cancelled) return;
+      if (probe.videoWidth > 0) setMode("video"); // browser can play it natively
+      else void fallbackToWebCodecs();            // audio-only / no decodable track
+    };
+    probe.onerror = () => { void fallbackToWebCodecs(); };
+
+    return () => { cancelled = true; URL.revokeObjectURL(url); };
   }, [file]);
 
   const toggle = (f: Fmt) => setFormats((s) => { const n = new Set(s); n.has(f) ? n.delete(f) : n.add(f); return n; });
@@ -119,8 +144,20 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
         <div className="p-5">
           <p className="mb-2 text-sm text-muted">Draw up to 2 subtitle zones over the frame (or leave the default band).</p>
           <div ref={stageRef} className="relative mx-auto aspect-video w-full overflow-hidden rounded-lg border border-border bg-black">
-            {!ready && <div className="absolute inset-0 grid place-items-center"><Spinner className="size-6" /></div>}
-            {previewErr ? (
+            {/* canvas stays mounted so the WebCodecs path always has its ref */}
+            <canvas ref={canvasRef} className="absolute inset-0 size-full object-contain" />
+            {mode === "video" && (
+              <video
+                ref={videoRef}
+                src={objectUrl ?? undefined}
+                muted
+                playsInline
+                className="absolute inset-0 size-full object-contain"
+                onLoadedData={(e) => { try { e.currentTarget.currentTime = Math.min(2, (e.currentTarget.duration || 4) / 2); } catch { /* seek best-effort */ } }}
+              />
+            )}
+            {mode === "loading" && <div className="absolute inset-0 grid place-items-center"><Spinner className="size-6" /></div>}
+            {mode === "error" && (
               <div className="absolute inset-0 grid place-items-center px-6 text-center">
                 <div>
                   <div className="text-sm text-muted">Preview unavailable in this browser.</div>
@@ -128,8 +165,6 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
                   <div className="mt-2 break-words font-mono text-[10px] text-faint/70">{previewErr}</div>
                 </div>
               </div>
-            ) : (
-              <canvas ref={canvasRef} className="absolute inset-0 size-full object-contain" />
             )}
             {ready && stageW > 0 && zones.map((z, i) => (
               <Rnd
