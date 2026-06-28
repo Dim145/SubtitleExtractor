@@ -3,7 +3,14 @@
 // PP-OCR on onnxruntime-web (WebGPU when available) → dedup → merge into cues.
 // No upload. Best for short clips; WebGPU strongly recommended.
 import { PaddleOcrService, getDefaultWebExecutionProviders } from "ppu-paddle-ocr/web";
+import { env as ortEnv } from "onnxruntime-web";
 import type { Zone } from "../api/types";
+
+// Load onnxruntime-web's WASM runtime SAME-ORIGIN (served at /ort/ by the Vite
+// plugin / nginx) instead of its default jsdelivr CDN — required under our CSP +
+// cross-origin isolation, and makes in-browser OCR fully offline. ort is a single
+// deduped instance shared with ppu-paddle-ocr, so setting this here applies to it.
+ortEnv.wasm.wasmPaths = new URL("/ort/", location.href).href;
 
 // PP-OCRv6 small models, self-hosted SAME-ORIGIN (served from /models by nginx /
 // the dev server) instead of the library's GitHub default. Keeps in-browser OCR

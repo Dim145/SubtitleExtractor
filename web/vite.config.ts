@@ -30,9 +30,35 @@ function webDemuxerAssets(): Plugin {
   };
 }
 
+// Serve onnxruntime-web's WASM runtime (jsep .mjs/.wasm) SAME-ORIGIN under /ort/.
+// onnxruntime-web otherwise loads these from a jsdelivr CDN, which is blocked by
+// our CSP/cross-origin isolation and breaks offline installs. clientOcr points
+// ort.env.wasm.wasmPaths at /ort/ so the in-browser OCR runtime is fully local.
+function onnxRuntimeAssets(): Plugin {
+  const files = ["ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"];
+  const dir = (f: string) => fileURLToPath(new URL(`node_modules/onnxruntime-web/dist/${f}`, import.meta.url));
+  const ctype = (f: string) => (f.endsWith(".wasm") ? "application/wasm" : "text/javascript");
+  return {
+    name: "onnxruntime-assets",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const m = req.url?.match(/^\/ort\/(ort-wasm-simd-threaded\.jsep\.(?:mjs|wasm))(\?.*)?$/);
+        if (!m) return next();
+        res.setHeader("Content-Type", ctype(m[1]));
+        res.end(readFileSync(dir(m[1])));
+      });
+    },
+    generateBundle() {
+      for (const f of files) {
+        this.emitFile({ type: "asset", fileName: `ort/${f}`, source: readFileSync(dir(f)) });
+      }
+    },
+  };
+}
+
 // In dev, proxy /api to the Go API so cookies are same-origin (no CORS dance).
 export default defineConfig({
-  plugins: [react(), tailwindcss(), webDemuxerAssets()],
+  plugins: [react(), tailwindcss(), webDemuxerAssets(), onnxRuntimeAssets()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
