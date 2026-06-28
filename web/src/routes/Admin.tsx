@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Trash2, Plus, X, ChevronDown } from "lucide-react";
+import { Trash2, Plus, X, ChevronDown, Check } from "lucide-react";
 import {
   useUsers, useCreateUser, usePatchUser, useDeleteUser,
   useAdminSettings, useSaveSettings,
@@ -75,20 +75,29 @@ function Workers() {
             </Button>
             <Button variant="ghost" size="icon" className="hover:text-err" onClick={() => del.mutate(w.id)}><Trash2 className="size-4" /></Button>
           </div>
-          {openId === w.id && <WorkerConfig worker={w} onSave={(config) => patch.mutate({ id: w.id, config })} saving={patch.isPending} />}
+          {openId === w.id && <WorkerConfig worker={w} />}
         </div>
       ))}
     </div>
   );
 }
 
-function WorkerConfig({ worker, onSave, saving }: { worker: Worker; onSave: (c: Record<string, unknown>) => void; saving: boolean }) {
+function WorkerConfig({ worker }: { worker: Worker }) {
+  const patch = usePatchWorker();
+  const [saved, setSaved] = useState(false);
   const schema = (worker.capabilities?.config_schema as ConfigField[] | undefined) ?? [];
   const [values, setValues] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {};
     for (const f of schema) v[f.key] = worker.config?.[f.key] ?? f.default;
     return v;
   });
+  function save() {
+    setSaved(false);
+    patch.mutate(
+      { id: worker.id, config: values },
+      { onSuccess: () => { setSaved(true); window.setTimeout(() => setSaved(false), 2500); } },
+    );
+  }
   if (!schema.length) return <div className="border-t border-border px-4 py-3 text-sm text-muted">This worker advertises no configurable parameters.</div>;
   const set = (k: string, val: unknown) => setValues((p) => ({ ...p, [k]: val }));
   return (
@@ -112,9 +121,21 @@ function WorkerConfig({ worker, onSave, saving }: { worker: Worker; onSave: (c: 
           </label>
         ))}
       </div>
-      <Button variant="primary" size="sm" className="mt-4" onClick={() => onSave(values)} disabled={saving}>
-        {saving ? <Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> : null} Save config
-      </Button>
+      <div className="mt-4 flex items-center gap-3">
+        <Button variant="primary" size="sm" onClick={save} disabled={patch.isPending}>
+          {patch.isPending ? (
+            <><Spinner className="border-accent-foreground/40 border-t-accent-foreground" /> Saving…</>
+          ) : saved ? (
+            <><Check className="size-3.5" /> Saved</>
+          ) : (
+            "Save config"
+          )}
+        </Button>
+        {saved && !patch.isPending && (
+          <span className="flex items-center gap-1 text-xs text-ok" role="status"><Check className="size-3.5" /> Configuration saved</span>
+        )}
+        {patch.isError && <span className="text-xs text-err" role="alert">Save failed — try again.</span>}
+      </div>
     </div>
   );
 }
