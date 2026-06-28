@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Play, Pause, Plus, Trash2, Save, Download, Check } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, Download, Check } from "lucide-react";
 import { useJob } from "@/api/jobs";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useWaveform } from "@/editor/useWaveform";
+import { useSourcePlayer } from "@/editor/player/useSourcePlayer";
+import { usePlayerHotkeys } from "@/editor/player/usePlayerHotkeys";
+import { MediaStage } from "@/editor/player/MediaStage";
 import {
   type Cue, parseSubtitles, displayTime, parseDisplayTime, newCue, toASS, toSRT, toVTT,
 } from "@/editor/subtitles";
@@ -29,28 +32,25 @@ export function Editor() {
   const [cues, setCues] = useState<Cue[]>([]);
   const [dims, setDims] = useState({ width: 1280, height: 720 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [format, setFormat] = useState<Format>("ass");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [videoError, setVideoError] = useState(false);
-  // The /video endpoint returns JSON {url} (presigned), not the bytes. Resolve it
-  // to a usable media URL once, then drive both <video> and the frames decoder.
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+  const [videoUnavailable, setVideoUnavailable] = useState(false);
 
-  const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const cueListRef = useRef<HTMLDivElement>(null);
 
-  // MKV / unplayable container → WebCodecs frame preview driven by a scrubber.
-  const [framesMode, setFramesMode] = useState(false);
-  const [framesError, setFramesError] = useState(false);
-  const decRef = useRef<{ frameAt: (t: number) => Promise<ImageBitmap>; width: number; height: number } | null>(null);
-  const framesCanvasRef = useRef<HTMLCanvasElement>(null);
-  const duration = useMemo(() => Math.max(10, cues.reduce((m, c) => Math.max(m, c.end), 0) + 5), [cues]);
+  // One unified player (native <video>, or WebCodecs frames for MKV/HEVC).
+  const player = useSourcePlayer({ url: mediaUrl });
+  usePlayerHotkeys(player);
+  const currentTime = player.currentTime;
+
+  // currentTime in a ref so editing hotkeys don't rebind on every frame.
+  const timeRef = useRef(0);
+  timeRef.current = currentTime;
 
   // ---- load existing subtitles ----
   useEffect(() => {
@@ -75,66 +75,31 @@ export function Editor() {
     return () => { stop = true; };
   }, [id]);
 
-  // ---- resolve the source video URL (JSON {url} → usable media URL) ----
+  // ---- resolve the source video URL (the /video endpoint returns JSON {url}) ----
   useEffect(() => {
     let stop = false;
     setMediaUrl(null);
-    setVideoError(false);
-    setFramesMode(false);
-    setFramesError(false);
+    setVideoUnavailable(false);
     (async () => {
       try {
         const info = await api.jobVideo(id);
         if (!stop) setMediaUrl(sameOriginApiUrl(info.url));
       } catch {
-        if (!stop) setFramesError(true); // no source at all → graceful "unavailable" fallback
+        if (!stop) setVideoUnavailable(true); // no source → editing still works
       }
     })();
     return () => { stop = true; };
   }, [id]);
 
-  const onUpdate = useCallback((cid: string, start: number, end: number) => {
-    setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, start, end } : c)));
-    setDirty(true);
-  }, []);
-
-  const drawFrame = useCallback((bmp: ImageBitmap) => {
-    const cv = framesCanvasRef.current;
-    if (!cv) return;
-    cv.width = bmp.width; cv.height = bmp.height;
-    cv.getContext("2d")?.drawImage(bmp, 0, 0);
-  }, []);
-
-  const seek = useCallback((t: number) => {
-    if (framesMode) { setCurrentTime(t); decRef.current?.frameAt(t).then(drawFrame).catch(() => {}); return; }
-    if (videoEl) videoEl.currentTime = t;
-  }, [videoEl, framesMode, drawFrame]);
-
-  // On native playback failure, fall back to decoding frames with WebCodecs.
-  useEffect(() => { if (videoError) setFramesMode(true); }, [videoError]);
+  // Prefer the real video resolution for ASS export once the player knows it.
   useEffect(() => {
-    if (!framesMode || !mediaUrl) return;
-    let stop = false;
-    (async () => {
-      try {
-        const blob = await fetch(mediaUrl, { credentials: "include" }).then((r) => r.blob());
-        if (blob.type.includes("json") || blob.size < 1024) throw new Error("source video unavailable");
-        const { FrameDecoder } = await import("@/editor/decodeFrame");
-        const dec = new FrameDecoder();
-        const bmp = await dec.init(new File([blob], "video", { type: blob.type }));
-        if (stop) return;
-        decRef.current = dec;
-        setDims({ width: dec.width || 1280, height: dec.height || 720 });
-        drawFrame(bmp);
-      } catch { if (!stop) setFramesError(true); }
-    })();
-    return () => { stop = true; };
-  }, [framesMode, mediaUrl, drawFrame]);
+    if ((player.mode === "video" || player.mode === "canvas") && player.dims.width) setDims(player.dims);
+  }, [player.mode, player.dims]);
 
   const wave = useWaveform({
-    media: framesMode ? null : videoEl, container: waveEl, cues, selectedId,
-    onUpdate,
-    onSelect: (cid) => { setSelectedId(cid); const c = cues.find((x) => x.id === cid); if (c) seek(c.start); },
+    media: player.mediaEl, container: waveEl, cues, selectedId,
+    onUpdate: (cid, start, end) => { setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, start, end } : c))); setDirty(true); },
+    onSelect: (cid) => { setSelectedId(cid); const c = cues.find((x) => x.id === cid); if (c) player.seek(c.start); },
   });
 
   // active cue (under the playhead) — drives the caption overlay + auto-scroll.
@@ -143,7 +108,6 @@ export function Editor() {
     const el = cueListRef.current?.querySelector(`[data-cue="${activeId}"]`);
     el?.scrollIntoView({ block: "nearest" });
   }, [activeId]);
-
   const activeCue = cues.find((c) => c.id === activeId);
 
   function patch(cid: string, p: Partial<Cue>) { setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, ...p } : c))); setDirty(true); }
@@ -170,26 +134,32 @@ export function Editor() {
     URL.revokeObjectURL(url);
   }
 
-  // keyboard: Space play/pause · [ / ] set in/out at playhead · ↑/↓ move selection
+  // Editing keys ([ / ] set in/out at the playhead · ↑/↓ move selection).
+  // Transport keys (Space, ← →, Home) live in usePlayerHotkeys, shared site-wide.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (["INPUT", "TEXTAREA"].includes(t.tagName) || t.isContentEditable) return;
-      if (e.code === "Space") { e.preventDefault(); wave.playPause(); return; }
-      if (e.key === "[" && selectedId) { e.preventDefault(); patch(selectedId, { start: currentTime }); return; }
-      if (e.key === "]" && selectedId) { e.preventDefault(); patch(selectedId, { end: currentTime }); return; }
+      if (e.key === "[" && selectedId) { e.preventDefault(); patch(selectedId, { start: timeRef.current }); return; }
+      if (e.key === "]" && selectedId) { e.preventDefault(); patch(selectedId, { end: timeRef.current }); return; }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         if (!cues.length) return;
         e.preventDefault();
         const idx = cues.findIndex((c) => c.id === selectedId);
         const ni = Math.max(0, Math.min(cues.length - 1, (idx < 0 ? 0 : idx) + (e.key === "ArrowDown" ? 1 : -1)));
         const c = cues[ni];
-        if (c) { setSelectedId(c.id); seek(c.start); }
+        if (c) { setSelectedId(c.id); player.seek(c.start); }
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [wave, selectedId, cues, currentTime, seek]);
+  }, [selectedId, cues, player.seek]);
+
+  const caption = activeCue ? (
+    <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
+      <span className="whitespace-pre-wrap rounded bg-black/65 px-3 py-1 text-[clamp(13px,2.4vw,20px)] font-medium text-white shadow">{activeCue.text}</span>
+    </div>
+  ) : null;
 
   return (
     <div className="mx-auto max-w-[1180px] px-5 py-6">
@@ -206,11 +176,6 @@ export function Editor() {
       <div className="overflow-hidden rounded-xl border border-border bg-surface">
         {/* toolbar */}
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-2 px-3 py-2">
-          <Button variant="ghost" size="icon" onClick={() => wave.playPause()} title="Play/Pause (Space)">
-            {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
-          </Button>
-          <span className="font-mono text-xs text-muted tabular-nums">{displayTime(currentTime)}</span>
-          <span className="mx-1 h-5 w-px bg-border" />
           <Button variant="default" size="sm" onClick={addCue}><Plus className="size-3.5" /> Cue</Button>
           <Button variant="default" size="sm" disabled={!selectedId} onClick={() => selectedId && delCue(selectedId)}><Trash2 className="size-3.5" /> Delete</Button>
           <span className="mx-1 h-5 w-px bg-border" />
@@ -226,41 +191,22 @@ export function Editor() {
         </div>
 
         <div className="grid lg:grid-cols-[1.55fr_1fr]">
-          {/* stage: video + waveform */}
+          {/* stage: player + waveform */}
           <div className="border-border lg:border-r">
-            <div className="relative aspect-video bg-black">
-              <video
-                ref={setVideoEl}
-                src={mediaUrl ?? undefined}
-                className="size-full"
-                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
-                onError={() => setVideoError(true)}
-                onLoadedMetadata={(e) => setDims({ width: e.currentTarget.videoWidth || 1280, height: e.currentTarget.videoHeight || 720 })}
-              />
-              {framesMode && !framesError && <canvas ref={framesCanvasRef} className="absolute inset-0 size-full bg-black object-contain" />}
-              {framesError && (
+            {videoUnavailable ? (
+              <div className="relative aspect-video bg-black">
                 <div className="absolute inset-0 grid place-items-center bg-surface-2 px-6 text-center">
                   <div>
                     <div className="text-sm font-medium">Source video unavailable</div>
                     <p className="mx-auto mt-1 max-w-xs text-xs text-muted">The original video can’t be previewed (removed, or an unsupported format). Cue text and timing editing still work.</p>
                   </div>
                 </div>
-              )}
-              {activeCue && (
-                <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
-                  <span className="whitespace-pre-wrap rounded bg-black/65 px-3 py-1 text-[clamp(13px,2.4vw,20px)] font-medium text-white shadow">{activeCue.text}</span>
-                </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <MediaStage player={player} overlay={caption} />
+            )}
             <div className="p-3">
-              {framesMode ? (
-                <div>
-                  <input type="range" min={0} max={duration} step={0.05} value={currentTime} onChange={(e) => seek(Number(e.target.value))} className="w-full accent-amber" />
-                  <div className="mt-1 text-[11px] text-faint">Frame scrubber · audio waveform unavailable for this container</div>
-                </div>
-              ) : (
+              {player.mode === "video" ? (
                 <>
                   <div ref={setWaveEl} className="rounded-lg border border-border bg-surface-2 p-1" />
                   <div className="mt-2 flex items-center gap-2 text-xs text-faint">
@@ -268,7 +214,9 @@ export function Editor() {
                     <span className="font-mono">zoom</span>
                   </div>
                 </>
-              )}
+              ) : player.mode === "canvas" ? (
+                <div className="text-[11px] text-faint">Frame preview · audio waveform unavailable for this container</div>
+              ) : null}
             </div>
           </div>
 
@@ -287,7 +235,7 @@ export function Editor() {
                   <div
                     key={c.id}
                     data-cue={c.id}
-                    onClick={() => { setSelectedId(c.id); seek(c.start); }}
+                    onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
                     className={cn(
                       "grid cursor-pointer grid-cols-[28px_88px_1fr] gap-2 border-b border-border px-3 py-2 text-sm",
                       c.id === activeId && "bg-amber/10",
@@ -320,7 +268,7 @@ export function Editor() {
           </div>
         </div>
       </div>
-      <p className="mt-2 text-xs text-muted">Cue list, waveform and video stay in sync. Drag a region to retime · Space plays/pauses · edits aren’t saved until you hit Save.</p>
+      <p className="mt-2 text-xs text-muted">Cue list, waveform and video stay in sync · Space play/pause · ← → seek 5s · [ / ] set in/out · ↑ ↓ select · edits aren’t saved until you hit Save.</p>
     </div>
   );
 }

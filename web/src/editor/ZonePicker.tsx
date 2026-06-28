@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { useNavigate } from "@tanstack/react-router";
 import { X, Plus, Server, Cpu } from "lucide-react";
@@ -9,6 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { subtitleFilename } from "@/lib/format";
 import { toSRT, toASS, toVTT } from "@/editor/subtitles";
+import { useSourcePlayer } from "@/editor/player/useSourcePlayer";
+import { usePlayerHotkeys } from "@/editor/player/usePlayerHotkeys";
+import { MediaStage } from "@/editor/player/MediaStage";
 
 const FORMATS = ["srt", "ass", "vtt"] as const;
 type Fmt = (typeof FORMATS)[number];
@@ -20,69 +23,21 @@ function download(name: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-/** Pick subtitle zones over a still frame, then extract on the server or in the
- * browser. Frame is decoded via WebCodecs (works for MP4 and MKV). */
+/** Pick subtitle zones over a playable preview, then extract on the server or in
+ * the browser. The preview uses the shared player (native <video>, or WebCodecs
+ * for MKV/HEVC) so it has play/pause, a seek bar and keyboard transport. */
 export function ZonePicker({ file, onClose }: { file: File; onClose: () => void }) {
   const navigate = useNavigate();
   const create = useCreateJob();
   const stageRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Prefer a native <video> backdrop (works for MP4/WebM in every browser, no
-  // WASM). Only containers the browser can't play (MKV/HEVC) fall back to a
-  // WebCodecs-decoded still on a canvas — which needs Chrome/Safari (Firefox's
-  // WebCodecs can't decode H.264, mozbug 1918769).
-  const [mode, setMode] = useState<"loading" | "video" | "canvas" | "error">("loading");
-  const [objectUrl, setObjectUrl] = useState<string | null>(null);
-  const [previewErr, setPreviewErr] = useState<string | null>(null);
-  const ready = mode === "video" || mode === "canvas";
+  const player = useSourcePlayer({ file });
+  usePlayerHotkeys(player);
+  const ready = player.mode === "video" || player.mode === "canvas";
+
   const [zones, setZones] = useState<Zone[]>([{ x: 0.06, y: 0.7, w: 0.88, h: 0.22 }]);
   const [formats, setFormats] = useState<Set<Fmt>>(new Set<Fmt>(["srt", "ass"]));
   const [progress, setProgress] = useState<{ pct: number; stage: string } | null>(null);
-
-  // Probe the file: native <video> first, WebCodecs fallback for MKV/HEVC.
-  useEffect(() => {
-    let cancelled = false;
-    const url = URL.createObjectURL(file);
-    setObjectUrl(url);
-    setMode("loading");
-    setPreviewErr(null);
-
-    const fallbackToWebCodecs = async () => {
-      if (cancelled) return;
-      if (!webCodecsAvailable()) { setPreviewErr("This browser has no WebCodecs video decoder."); setMode("error"); return; }
-      let dec: import("@/editor/decodeFrame").FrameDecoder | null = null;
-      try {
-        const { FrameDecoder } = await import("@/editor/decodeFrame");
-        dec = new FrameDecoder();
-        const bmp = await dec.init(file); // init() decodes & returns a representative frame
-        if (cancelled) return;
-        const cv = canvasRef.current; // always mounted, so the ref is ready
-        if (cv) { cv.width = dec.width; cv.height = dec.height; cv.getContext("2d")?.drawImage(bmp, 0, 0); }
-        setMode("canvas");
-      } catch (e) {
-        console.error("[ZonePicker] WebCodecs decode failed:", e);
-        const msg = e instanceof Error ? `${e.name}: ${e.message}` : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : String(e);
-        if (!cancelled) { setPreviewErr(msg || "Couldn't decode this file."); setMode("error"); }
-      } finally {
-        dec?.destroy();
-      }
-    };
-
-    const probe = document.createElement("video");
-    probe.preload = "metadata";
-    probe.muted = true;
-    probe.src = url;
-    probe.onloadedmetadata = () => {
-      if (cancelled) return;
-      if (probe.videoWidth > 0) setMode("video"); // browser can play it natively
-      else void fallbackToWebCodecs();            // audio-only / no decodable track
-    };
-    probe.onerror = () => { void fallbackToWebCodecs(); };
-
-    return () => { cancelled = true; URL.revokeObjectURL(url); };
-  }, [file]);
 
   const toggle = (f: Fmt) => setFormats((s) => { const n = new Set(s); n.has(f) ? n.delete(f) : n.add(f); return n; });
 
@@ -130,6 +85,24 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   const stageW = stageRef.current?.clientWidth || 0;
   const stageH = stageRef.current?.clientHeight || 0;
 
+  const zoneOverlay = ready && stageW > 0 ? zones.map((z, i) => (
+    <Rnd
+      key={i}
+      bounds="parent"
+      size={{ width: z.w * stageW, height: z.h * stageH }}
+      position={{ x: z.x * stageW, y: z.y * stageH }}
+      onDragStop={(_e, d) => setZones((zs) => zs.map((zz, idx) => idx === i ? norm({ x: d.x, y: d.y, width: z.w * stageW, height: z.h * stageH }) : zz))}
+      onResizeStop={(_e, _dir, ref, _delta, pos) => setZones((zs) => zs.map((zz, idx) => idx === i ? norm({ x: pos.x, y: pos.y, width: ref.offsetWidth, height: ref.offsetHeight }) : zz))}
+      className="z-10"
+    >
+      <div className={`relative size-full rounded ${i === 0 ? "border-2 border-accent" : "border-2 border-amber"}`}>
+        <span className={`absolute -top-2.5 left-1.5 rounded px-1.5 text-[9px] font-bold text-[#04181c] ${i === 0 ? "bg-accent" : "bg-amber"}`}>ZONE {i === 0 ? "A" : "B"}</span>
+        <button onMouseDown={(e) => e.stopPropagation()} onClick={() => setZones((zs) => zs.filter((_, idx) => idx !== i))}
+          className="absolute -right-2 -top-2 z-20 grid size-5 place-items-center rounded-full bg-surface text-err shadow"><X className="size-3" /></button>
+      </div>
+    </Rnd>
+  )) : null;
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="my-6 w-full max-w-3xl rounded-2xl border border-border-strong bg-surface shadow-2xl">
@@ -142,48 +115,20 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
         </div>
 
         <div className="p-5">
-          <p className="mb-2 text-sm text-muted">Draw up to 2 subtitle zones over the frame (or leave the default band).</p>
-          <div ref={stageRef} className="relative mx-auto aspect-video w-full overflow-hidden rounded-lg border border-border bg-black">
-            {/* canvas stays mounted so the WebCodecs path always has its ref */}
-            <canvas ref={canvasRef} className="absolute inset-0 size-full object-contain" />
-            {mode === "video" && (
-              <video
-                ref={videoRef}
-                src={objectUrl ?? undefined}
-                muted
-                playsInline
-                className="absolute inset-0 size-full object-contain"
-                onLoadedData={(e) => { try { e.currentTarget.currentTime = Math.min(2, (e.currentTarget.duration || 4) / 2); } catch { /* seek best-effort */ } }}
-              />
-            )}
-            {mode === "loading" && <div className="absolute inset-0 grid place-items-center"><Spinner className="size-6" /></div>}
-            {mode === "error" && (
-              <div className="absolute inset-0 grid place-items-center px-6 text-center">
-                <div>
-                  <div className="text-sm text-muted">Preview unavailable in this browser.</div>
-                  <div className="mt-1 text-xs text-faint">Set zones by ratio and extract — it still works.</div>
-                  <div className="mt-2 break-words font-mono text-[10px] text-faint/70">{previewErr}</div>
-                </div>
+          <p className="mb-2 text-sm text-muted">Draw up to 2 subtitle zones over the frame (or leave the default band). Play/seek to find a frame with subtitles.</p>
+          <MediaStage
+            player={player}
+            stageRef={stageRef}
+            overlay={zoneOverlay}
+            className="overflow-hidden rounded-lg border border-border"
+            unavailable={
+              <div>
+                <div className="text-sm text-muted">Preview unavailable in this browser.</div>
+                <div className="mt-1 text-xs text-faint">Set zones by ratio and extract — it still works.</div>
+                {player.error && <div className="mt-2 break-words font-mono text-[10px] text-faint/70">{player.error}</div>}
               </div>
-            )}
-            {ready && stageW > 0 && zones.map((z, i) => (
-              <Rnd
-                key={i}
-                bounds="parent"
-                size={{ width: z.w * stageW, height: z.h * stageH }}
-                position={{ x: z.x * stageW, y: z.y * stageH }}
-                onDragStop={(_e, d) => setZones((zs) => zs.map((zz, idx) => idx === i ? norm({ x: d.x, y: d.y, width: z.w * stageW, height: z.h * stageH }) : zz))}
-                onResizeStop={(_e, _dir, ref, _delta, pos) => setZones((zs) => zs.map((zz, idx) => idx === i ? norm({ x: pos.x, y: pos.y, width: ref.offsetWidth, height: ref.offsetHeight }) : zz))}
-                className="z-10"
-              >
-                <div className={`relative size-full rounded ${i === 0 ? "border-2 border-accent" : "border-2 border-amber"}`}>
-                  <span className={`absolute -top-2.5 left-1.5 rounded px-1.5 text-[9px] font-bold text-[#04181c] ${i === 0 ? "bg-accent" : "bg-amber"}`}>ZONE {i === 0 ? "A" : "B"}</span>
-                  <button onMouseDown={(e) => e.stopPropagation()} onClick={() => setZones((zs) => zs.filter((_, idx) => idx !== i))}
-                    className="absolute -right-2 -top-2 z-20 grid size-5 place-items-center rounded-full bg-surface text-err shadow"><X className="size-3" /></button>
-                </div>
-              </Rnd>
-            ))}
-          </div>
+            }
+          />
 
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <Button variant="default" size="sm" disabled={zones.length >= 2} onClick={() => setZones((z) => [...z, { x: 0.3, y: 0.1, w: 0.4, h: 0.14 }])}><Plus className="size-3.5" /> Add zone</Button>
