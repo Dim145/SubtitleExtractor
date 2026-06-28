@@ -8,6 +8,7 @@
 
 services:
   nvidia-worker:
+    image: ghcr.io/dim145/subtitleextractor-worker-nvidia:${IMAGE_TAG:-latest}
     build:
       context: ./worker
       dockerfile: Dockerfile.nvidia

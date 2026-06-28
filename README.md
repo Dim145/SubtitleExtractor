@@ -51,11 +51,29 @@ worker/   Python OCR worker (shared pipeline; macOS + NVIDIA backends)
 web/      React + Vite frontend (subtitle editor)
 ```
 
-## Quick start (dev)
+## Quick start
 
 ```bash
 cp .env.example .env          # then edit secrets (JWT_SIGNING_KEY, INTERNAL_API_TOKEN, ...)
-docker compose up --build     # starts postgres + minio + api + web
+```
+
+**Run prebuilt images** (from GitHub Container Registry — no local build):
+
+```bash
+docker compose pull           # fetch ghcr.io/dim145/subtitleextractor-* images
+docker compose up -d          # starts postgres + minio + api + web
+```
+
+Pin a version instead of `latest` with `IMAGE_TAG` (in `.env` or inline):
+`IMAGE_TAG=0.1.0 docker compose up -d`.
+
+**Or build locally** (for development):
+
+```bash
+docker compose up --build
+```
+
+```text
 # App (frontend):  http://localhost:3000   (nginx serves the SPA + proxies /api)
 # API:             http://localhost:8080
 # health check:    http://localhost:8080/healthz

@@ -55,6 +55,10 @@ services:
       "
 
   api:
+    # Prebuilt image from GHCR. `docker compose pull` fetches it; `up --build`
+    # rebuilds locally and tags it with this same name. Override the tag with
+    # IMAGE_TAG (e.g. IMAGE_TAG=0.1.0) in .env or the environment.
+    image: ghcr.io/dim145/subtitleextractor-api:${IMAGE_TAG:-latest}
     build:
       context: ./api
     restart: unless-stopped
@@ -72,6 +76,7 @@ services:
       - blobs:/data/blobs
 
   web:
+    image: ghcr.io/dim145/subtitleextractor-web:${IMAGE_TAG:-latest}
     build:
       context: ./web
     restart: unless-stopped
