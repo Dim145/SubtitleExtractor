@@ -3,10 +3,13 @@
 # That avoids pulling the CUDA-specific paddle wheel from a flaky mirror, and its
 # pip handles a plain `pip install .` cleanly (no editable / PEP 660 workaround).
 #
+# CUDA 12.6 is chosen for broad host-driver compatibility (needs NVIDIA driver
+# ~R535+). Newer cuda13.0 images exist but require driver ~R580+ on the host.
+#
 # OCR runs on the GPU through PaddleOCR 3.x (the `ppocr` backend).
 # Run on a Linux host with an NVIDIA GPU and the nvidia-container-toolkit.
 # Added to the stack via docker-compose.nvidia.yml.
-FROM paddlepaddle/paddle:3.3.0-gpu-cuda12.6-cudnn9.5
+FROM paddlepaddle/paddle:3.3.1-gpu-cuda12.6-cudnn9.5
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
