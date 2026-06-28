@@ -3,6 +3,7 @@
 // PP-OCR on onnxruntime-web (WebGPU when available) → dedup → merge into cues.
 // No upload. Best for short clips; WebGPU strongly recommended.
 import { PaddleOcrService, getDefaultWebExecutionProviders } from "ppu-paddle-ocr/web";
+import { env as ortEnv } from "onnxruntime-web";
 import type { Zone } from "../api/types";
 import type { Cue } from "../editor/subtitles";
 import { FrameDecoder } from "../editor/decodeFrame";
@@ -118,6 +119,12 @@ export async function extractInBrowser(
   onProgress: (pct: number, stage: string) => void,
 ): Promise<ClientExtractResult> {
   onProgress(2, "loading model");
+  // onnxruntime-web's multi-threaded WASM backend needs SharedArrayBuffer, which
+  // requires cross-origin isolation (COOP/COEP) the app doesn't enable. Force the
+  // single-threaded backend so in-browser OCR works without it. WebGPU is still
+  // preferred when available; this only affects the WASM fallback. Slower, but
+  // browser OCR targets short clips.
+  try { ortEnv.wasm.numThreads = 1; } catch { /* env may be frozen in some builds */ }
   const ocr = new PaddleOcrService({
     processing: { engine: "canvas-native" },
     session: { executionProviders: await getDefaultWebExecutionProviders() },
