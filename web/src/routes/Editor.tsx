@@ -36,6 +36,7 @@ export function Editor() {
   const [format, setFormat] = useState<Format>("ass");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [videoError, setVideoError] = useState(false);
 
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
@@ -110,17 +111,26 @@ export function Editor() {
     URL.revokeObjectURL(url);
   }
 
-  // keyboard: space = play/pause (outside inputs)
+  // keyboard: Space play/pause · [ / ] set in/out at playhead · ↑/↓ move selection
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (e.code === "Space" && !["INPUT", "TEXTAREA"].includes(t.tagName) && !t.isContentEditable) {
-        e.preventDefault(); wave.playPause();
+      if (["INPUT", "TEXTAREA"].includes(t.tagName) || t.isContentEditable) return;
+      if (e.code === "Space") { e.preventDefault(); wave.playPause(); return; }
+      if (e.key === "[" && selectedId) { e.preventDefault(); patch(selectedId, { start: currentTime }); return; }
+      if (e.key === "]" && selectedId) { e.preventDefault(); patch(selectedId, { end: currentTime }); return; }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!cues.length) return;
+        e.preventDefault();
+        const idx = cues.findIndex((c) => c.id === selectedId);
+        const ni = Math.max(0, Math.min(cues.length - 1, (idx < 0 ? 0 : idx) + (e.key === "ArrowDown" ? 1 : -1)));
+        const c = cues[ni];
+        if (c) { setSelectedId(c.id); seek(c.start); }
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [wave]);
+  }, [wave, selectedId, cues, currentTime, seek]);
 
   const videoSrc = `/api/jobs/${id}/video`;
 
@@ -169,8 +179,17 @@ export function Editor() {
                 onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
+                onError={() => setVideoError(true)}
                 onLoadedMetadata={(e) => setDims({ width: e.currentTarget.videoWidth || 1280, height: e.currentTarget.videoHeight || 720 })}
               />
+              {videoError && (
+                <div className="absolute inset-0 grid place-items-center bg-surface-2 px-6 text-center">
+                  <div>
+                    <div className="text-sm font-medium">Preview unavailable for this container</div>
+                    <p className="mx-auto mt-1 max-w-xs text-xs text-muted">The browser can’t play this video format (e.g. MKV). Cue text and timing editing still work.</p>
+                  </div>
+                </div>
+              )}
               {activeCue && (
                 <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
                   <span className="whitespace-pre-wrap rounded bg-black/65 px-3 py-1 text-[clamp(13px,2.4vw,20px)] font-medium text-white shadow">{activeCue.text}</span>

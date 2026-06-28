@@ -1,10 +1,22 @@
+import { lazy, Suspense } from "react";
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { RootLayout } from "@/app/RootLayout";
 import { Login } from "@/routes/Login";
 import { Dashboard } from "@/routes/Dashboard";
 import { JobDetail } from "@/routes/JobDetail";
-import { Editor } from "@/routes/Editor";
 import { Admin } from "@/routes/Admin";
+import { Spinner } from "@/components/ui/spinner";
+
+// Code-split the editor: it pulls in wavesurfer + the subtitle stack, which the
+// dashboard/login don't need.
+const EditorLazy = lazy(() => import("@/routes/Editor").then((m) => ({ default: m.Editor })));
+function Editor() {
+  return (
+    <Suspense fallback={<div className="grid min-h-[60vh] place-items-center"><Spinner className="size-6" /></div>}>
+      <EditorLazy />
+    </Suspense>
+  );
+}
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
