@@ -14,6 +14,7 @@ Recall + precision techniques (per the design research):
 from __future__ import annotations
 
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -25,6 +26,45 @@ from rapidfuzz.distance import Levenshtein
 # Pure digits / punctuation up to 3 chars → almost always hallucination junk.
 _JUNK_RE = re.compile(r"^[\W\d_]{1,3}$")
 _HAS_LETTER = re.compile(r"[^\W\d_]")
+
+# ReDoS hardening for admin-supplied substitution regexes. Two stdlib-only
+# mitigations, no extra dependency (the `regex` module with a real timeout is
+# unavailable here):
+#   1. Cap the input each regex sees — catastrophic backtracking is super-linear
+#      in input length, so a tight cap bounds the blast radius. Real cue text is
+#      a line or two, well under the cap.
+#   2. Run each sub() on a daemon worker thread with a wall-clock budget; if it
+#      overruns we abandon it and leave the text unchanged for that rule.
+# Residual limitation: CPython can't interrupt a thread stuck in C-level regex
+# code, so an abandoned thread keeps burning ONE core until that sub() returns —
+# but the job's main thread proceeds, so the job is never hung. Combined with the
+# input cap and the admin-UI validation, this keeps a bad pattern from hanging
+# the process indefinitely.
+_SUB_MAX_INPUT = 4_000  # chars; real cues are a line or two
+_SUB_TIMEOUT_SECS = 0.5
+
+
+def _safe_sub(pattern: "re.Pattern", repl: str, text: str) -> str:
+    """re.sub under a length cap + watchdog. Returns the original text if the
+    substitution exceeds the time budget (likely catastrophic backtracking)."""
+    if len(text) > _SUB_MAX_INPUT:
+        text = text[:_SUB_MAX_INPUT]
+    result: list[str] = []
+
+    def _run() -> None:
+        try:
+            result.append(pattern.sub(repl, text))
+        except Exception:  # noqa: BLE001
+            pass
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(_SUB_TIMEOUT_SECS)
+    if t.is_alive() or not result:
+        # Timed out (thread can't be force-killed; it's daemon so it dies with the
+        # process) or errored — leave the text unmodified for this rule.
+        return text
+    return result[0]
 
 
 @dataclass
@@ -112,6 +152,8 @@ def apply_substitution_rules(
             continue
         is_regex = bool(rule.get("isRegex") or rule.get("is_regex"))
         if is_regex:
+            # Compile once (validates the pattern; invalid ones are skipped). The
+            # per-cue sub runs under a watchdog (_safe_sub) to bound ReDoS impact.
             try:
                 compiled.append((True, re.compile(find), repl))
             except re.error:
@@ -122,7 +164,7 @@ def apply_substitution_rules(
     for c in cues:
         text = c.text
         for is_regex, pat, repl in compiled:
-            text = pat.sub(repl, text) if is_regex else text.replace(pat, repl)
+            text = _safe_sub(pat, repl, text) if is_regex else text.replace(pat, repl)
         c.text = text
     return cues
 
@@ -185,8 +227,12 @@ def consensus_text(texts: list[str], weights: list[float] | None = None) -> str:
         if not votes:
             out.append(anchor[k])
             continue
-        # Highest weighted vote; ties prefer the anchor's own character.
-        best_ch = max(votes.items(), key=lambda kv: (kv[1], kv[0] == anchor[k]))[0]
+        # Highest weighted vote; ties are broken deterministically: prefer the
+        # anchor's own character, then the lowest codepoint (stable, not dict order).
+        best_ch = max(
+            votes.items(),
+            key=lambda kv: (kv[1], kv[0] == anchor[k], -ord(kv[0]) if kv[0] else 1),
+        )[0]
         out.append(best_ch)
     return "".join(out)
 

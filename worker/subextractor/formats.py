@@ -5,7 +5,30 @@ the OCR bounding box. SRT and WebVTT are plain timed-text down-conversions.
 """
 from __future__ import annotations
 
+import re
+
 from .dedup import Cue
+
+# A line that is exactly "-->" (optionally surrounded by whitespace) would be
+# read by an SRT/VTT parser as a timing line; "-->" anywhere in a VTT cue body
+# is also illegal. Used to sanitize cue text below.
+_ARROW_RE = re.compile(r"-->")
+
+
+def _clean_block(text: str, *, escape_arrows: bool) -> str:
+    """Make cue text safe to embed in an SRT/VTT block: strip blank lines (a blank
+    line ends a cue) and neutralize `-->` so a line can't be mistaken for a timing
+    line or, in VTT, violate the no-`-->`-in-body rule."""
+    out: list[str] = []
+    for ln in text.split("\n"):
+        ln = ln.rstrip("\r")
+        if escape_arrows:
+            ln = _ARROW_RE.sub("->", ln)  # VTT: '-->' is illegal anywhere in body
+        elif ln.strip() == "-->":
+            ln = "->"  # SRT: a lone '-->' line looks like a timing line
+        if ln.strip():  # drop blank lines (they terminate the cue block)
+            out.append(ln)
+    return "\n".join(out)
 
 
 def _srt_time(t: float) -> str:
@@ -36,7 +59,9 @@ def _ass_time(t: float) -> str:
 def write_srt(cues: list[Cue], path: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         for i, c in enumerate(cues, start=1):
-            text = c.text.replace("\n", "\n")
+            text = _clean_block(c.text, escape_arrows=False)
+            if not text:
+                continue
             fh.write(f"{i}\n{_srt_time(c.start)} --> {_srt_time(c.end)}\n{text}\n\n")
 
 
@@ -44,7 +69,10 @@ def write_vtt(cues: list[Cue], path: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("WEBVTT\n\n")
         for i, c in enumerate(cues, start=1):
-            fh.write(f"{i}\n{_vtt_time(c.start)} --> {_vtt_time(c.end)}\n{c.text}\n\n")
+            text = _clean_block(c.text, escape_arrows=True)
+            if not text:
+                continue
+            fh.write(f"{i}\n{_vtt_time(c.start)} --> {_vtt_time(c.end)}\n{text}\n\n")
 
 
 def write_ass(cues: list[Cue], path: str, width: int, height: int, fontsize: int = 0) -> None:

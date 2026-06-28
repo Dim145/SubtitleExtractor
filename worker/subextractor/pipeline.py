@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
+import time
 from typing import Any
 
 import cv2
@@ -117,6 +119,9 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
         info = probe(video_path)
         zones = _resolve_zones(params, wcfg, info.width, info.height)
         est_total = max(1, int(info.duration * sample_fps))
+        # Nominal interval; replaced by the decoder's REAL interval once the first
+        # frame is sampled (the OpenCV path steps round(fps/sample_fps) frames, so
+        # its true interval is step/video_fps, not 1/sample_fps).
         frame_interval = 1.0 / sample_fps
         client.log(
             job_id,
@@ -131,34 +136,68 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
         prev_mask: list[Any] = [None for _ in zones]
         prev_lines: list[list] = [[] for _ in zones]
 
-        for i, sf in enumerate(sample_frames_auto(video_path, sample_fps, decoder, hwaccel)):
-            for zi, (zx, zy, zw, zh) in enumerate(zones):
-                crop = sf.image[zy:zy + zh, zx:zx + zw]
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                mask = text_mask(gray)
-                fg = float(np.count_nonzero(mask)) / max(1, mask.size)
+        # Liveness: a background timer pings the job heartbeat so the API sees a
+        # long-running job as alive even between progress posts. Stopped in the
+        # `finally` below so it never outlives the job.
+        hb_stop = threading.Event()
 
-                if fg < 0.002 or text_presence(gray) < presence_thr:
-                    lines = []  # no text-like content → skip OCR (avoids hallucinations)
-                elif prev_mask[zi] is not None and mask_diff_ratio(mask, prev_mask[zi]) < change_thr:
-                    lines = prev_lines[zi]  # text unchanged → reuse last reading
-                else:
-                    ocr_img = crop
-                    if upscale > 1.0:
-                        ocr_img = cv2.resize(crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-                    lines = backend.recognize(ocr_img)
-                prev_mask[zi], prev_lines[zi] = mask, lines
+        def _heartbeat_loop() -> None:
+            while not hb_stop.wait(10.0):
+                try:
+                    client.heartbeat(job_id)
+                except Exception:  # noqa: BLE001
+                    pass  # transient; the next tick (or progress poll) retries
 
-                good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
-                text = "\n".join(l.text for l in good if l.text)
-                conf = (sum(l.confidence for l in good) / len(good)) if good else 1.0
-                samples[zi].append((sf.timestamp, text, zone_an[zi], conf))
+        hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+        hb_thread.start()
 
-            if i % 15 == 0:
-                pct = 6 + int(min(80, (i / est_total) * 80))
-                client.progress(job_id, pct, "ocr", log=f"frame {i}/{est_total}")
+        # Wall-clock cancel polling: detect cancellation within a few seconds even
+        # if frame indices advance slowly (heavy OCR) — independent of `i % 15`.
+        CANCEL_POLL_SECS = 3.0
+        last_cancel_poll = time.monotonic()
 
-        client.progress(job_id, 88, "merging", log="merging frames into cues")
+        try:
+            for i, sf in enumerate(sample_frames_auto(video_path, sample_fps, decoder, hwaccel)):
+                if i == 0 and sf.interval > 0:
+                    frame_interval = sf.interval  # adopt the decoder's REAL interval
+                for zi, (zx, zy, zw, zh) in enumerate(zones):
+                    crop = sf.image[zy:zy + zh, zx:zx + zw]
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    mask = text_mask(gray)
+                    fg = float(np.count_nonzero(mask)) / max(1, mask.size)
+
+                    if fg < 0.002 or text_presence(gray) < presence_thr:
+                        lines = []  # no text-like content → skip OCR (avoids hallucinations)
+                    elif prev_mask[zi] is not None and mask_diff_ratio(mask, prev_mask[zi]) < change_thr:
+                        lines = prev_lines[zi]  # text unchanged → reuse last reading
+                    else:
+                        ocr_img = crop
+                        if upscale > 1.0:
+                            ocr_img = cv2.resize(crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+                        lines = backend.recognize(ocr_img)
+                    prev_mask[zi], prev_lines[zi] = mask, lines
+
+                    good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
+                    text = "\n".join(l.text for l in good if l.text)
+                    conf = (sum(l.confidence for l in good) / len(good)) if good else 1.0
+                    samples[zi].append((sf.timestamp, text, zone_an[zi], conf))
+
+                now = time.monotonic()
+                if i % 15 == 0:
+                    pct = 6 + int(min(80, (i / est_total) * 80))
+                    client.progress(job_id, pct, "ocr", log=f"frame {i}/{est_total}")  # 409 → JobCanceled
+                    last_cancel_poll = now
+                elif now - last_cancel_poll >= CANCEL_POLL_SECS:
+                    # Time-based cancel check between progress posts (409 → JobCanceled).
+                    client.progress(job_id, 6 + int(min(80, (i / est_total) * 80)), "ocr")
+                    last_cancel_poll = now
+        finally:
+            hb_stop.set()
+            hb_thread.join(timeout=2.0)
+
+        # Honor a cancel that arrives during/just before merge+upload, so we never
+        # send complete(success=True) for a job the user already canceled.
+        client.progress(job_id, 88, "merging", log="merging frames into cues")  # 409 → JobCanceled
         cues: list[Cue] = []
         for zi in range(len(zones)):
             cues.extend(
@@ -179,6 +218,7 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
         if not cues:
             client.log(job_id, "no subtitles detected", level="warn")
 
+        # Final cancel checkpoint before we write + upload results (409 → JobCanceled).
         client.progress(job_id, 94, "writing", log=f"writing formats: {', '.join(formats)}")
         if "srt" in formats:
             srt_path = os.path.join(tmp, "subtitles.srt")

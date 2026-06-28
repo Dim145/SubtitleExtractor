@@ -50,6 +50,8 @@ class PPOCRBackend(OCRBackend):
         results = self._engine.predict(image)
         if not results:
             return []
+        h, w = image.shape[:2]
+        full_bbox = (0.0, 0.0, float(w), float(h))
         lines: list[OCRLine] = []
         for res in results:
             texts = res.get("rec_texts") or []
@@ -59,17 +61,25 @@ class PPOCRBackend(OCRBackend):
                 polys = res.get("dt_polys") or []
             if hasattr(scores, "tolist"):
                 scores = scores.tolist()
-            for i in range(min(len(texts), len(polys))):
-                poly = polys[i]
-                if hasattr(poly, "tolist"):
+            # Iterate over EVERY recognized text. If the matching detection poly is
+            # missing (fewer polys than texts), fall back to the full crop as the
+            # bbox (alignment then comes from the zone position) rather than
+            # silently dropping the recognized line — mirrors the VL backend.
+            for i in range(len(texts)):
+                poly = polys[i] if i < len(polys) else None
+                if poly is not None and hasattr(poly, "tolist"):
                     poly = poly.tolist()
-                xs = [float(p[0]) for p in poly]
-                ys = [float(p[1]) for p in poly]
+                if poly:
+                    xs = [float(p[0]) for p in poly]
+                    ys = [float(p[1]) for p in poly]
+                    bbox = (min(xs), min(ys), max(xs), max(ys))
+                else:
+                    bbox = full_bbox
                 score = float(scores[i]) if scores is not None and i < len(scores) else 1.0
                 lines.append(
                     OCRLine(
                         text=str(texts[i]).strip(),
-                        bbox=(min(xs), min(ys), max(xs), max(ys)),
+                        bbox=bbox,
                         confidence=score,
                     )
                 )
