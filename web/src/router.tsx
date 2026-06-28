@@ -4,7 +4,7 @@ import { Login } from "@/routes/Login";
 import { Dashboard } from "@/routes/Dashboard";
 import { JobDetail } from "@/routes/JobDetail";
 import { Editor } from "@/routes/Editor";
-import { Admin } from "@/routes/stubs";
+import { Admin } from "@/routes/Admin";
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
