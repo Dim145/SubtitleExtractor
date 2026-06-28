@@ -433,6 +433,62 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleDownloadResult streams a subtitle result through the API (same-origin).
+// This is the reliable fallback to the presigned download URL: it never needs a
+// public bucket and is immune to S3 clock-skew / signature issues ("Date is too
+// old"), because the API fetches the object with its own credentials.
+func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.ownedJob(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.jobs.ResultByID(r.Context(), chi.URLParam(r, "resultId"))
+	if err != nil || res.JobID != job.ID {
+		writeError(w, http.StatusNotFound, "result not found")
+		return
+	}
+	rc, err := s.store.Get(r.Context(), res.StorageKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read result")
+		return
+	}
+	defer rc.Close()
+	name := "subtitles." + res.Kind
+	if res.Name != nil && *res.Name != "" {
+		name = sanitizeFilename(*res.Name)
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+strings.ReplaceAll(name, "\"", "")+"\"")
+	_, _ = io.Copy(w, rc)
+}
+
+// handleVideoStream proxies the source video through the API (same-origin, with
+// HTTP Range support so the editor can seek). Reliable fallback to the presigned
+// /video URL for non-public buckets / S3 signature issues.
+func (s *Server) handleVideoStream(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.ownedJob(w, r)
+	if !ok {
+		return
+	}
+	rc, err := s.store.Get(r.Context(), job.InputKey)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "source video unavailable")
+		return
+	}
+	defer rc.Close()
+	ct := "video/mp4"
+	if blob, err := s.store.Stat(r.Context(), job.InputKey); err == nil && blob.ContentType != "" {
+		ct = blob.ContentType
+	}
+	w.Header().Set("Content-Type", ct)
+	if rs, ok := rc.(io.ReadSeeker); ok {
+		// ServeContent handles Range, Content-Length and conditional requests.
+		http.ServeContent(w, r, job.SourceFilename, time.Time{}, rs)
+		return
+	}
+	_, _ = io.Copy(w, rc)
+}
+
 // ownedJob fetches the job in the URL and enforces ownership (admins bypass).
 func (s *Server) ownedJob(w http.ResponseWriter, r *http.Request) (*jobs.Job, bool) {
 	u := auth.UserFromContext(r.Context())

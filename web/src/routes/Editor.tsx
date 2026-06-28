@@ -54,6 +54,7 @@ export function Editor() {
   const [error, setError] = useState<string | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [videoUnavailable, setVideoUnavailable] = useState(false);
+  const [videoFellBack, setVideoFellBack] = useState(false);
 
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const cueListRef = useRef<HTMLDivElement>(null);
@@ -98,6 +99,7 @@ export function Editor() {
     let stop = false;
     setMediaUrl(null);
     setVideoUnavailable(false);
+    setVideoFellBack(false);
     (async () => {
       try {
         const info = await api.jobVideo(id);
@@ -113,6 +115,16 @@ export function Editor() {
   useEffect(() => {
     if ((player.mode === "video" || player.mode === "canvas") && player.dims.width) setDims(player.dims);
   }, [player.mode, player.dims]);
+
+  // If the presigned video URL can't be played (e.g. non-public S3 bucket or an
+  // S3 signature/clock-skew issue), fall back once to streaming it through the
+  // API (same-origin, Range-capable).
+  useEffect(() => {
+    if (player.mode === "error" && !videoFellBack && mediaUrl) {
+      setVideoFellBack(true);
+      setMediaUrl(`/api/jobs/${id}/video/raw`);
+    }
+  }, [player.mode, videoFellBack, mediaUrl, id]);
 
   const wave = useWaveform({
     media: player.mediaEl, container: waveEl, cues, selectedId,

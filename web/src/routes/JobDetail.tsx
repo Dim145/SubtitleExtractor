@@ -28,6 +28,23 @@ export function JobDetail() {
     delResult.mutate(resultId, { onSuccess: (r) => { if (r.jobDeleted) navigate({ to: "/" }); } });
   }
 
+  // Download via the presigned URL; if that's unreachable (non-public bucket,
+  // S3 signature/clock-skew), fall back to streaming through the API.
+  async function downloadResult(r: { id: string; downloadUrl: string }, filename: string) {
+    const grab = async (url: string) => {
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(String(res.status));
+      return res.blob();
+    };
+    let blob: Blob;
+    try { blob = await grab(sameOriginApiUrl(r.downloadUrl)); }
+    catch { blob = await grab(`/api/jobs/${id}/results/${r.id}/download`); }
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = u; a.download = filename; a.click();
+    URL.revokeObjectURL(u);
+  }
+
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); }, [logs]);
 
@@ -82,15 +99,13 @@ export function JobDetail() {
             <div className="grid gap-2">
               {results.data.map((r) => {
                 const name = r.name || subtitleFilename(job.sourceFilename, r.kind);
-                const base = sameOriginApiUrl(r.downloadUrl);
-                const href = base + (base.includes("?") ? "&" : "?") + "name=" + encodeURIComponent(name);
                 const isLast = results.data!.length === 1;
                 return (
                   <div key={r.id} className="flex items-center gap-1 rounded-lg border border-border-strong bg-surface-2 pr-1 hover:border-accent">
-                    <a href={href} download={name} className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 py-2 text-sm">
+                    <button type="button" onClick={() => downloadResult(r, name)} className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 py-2 text-left text-sm">
                       <span className="flex min-w-0 items-center gap-2"><Download className="size-4 shrink-0 text-muted" /> <span className="truncate">{name}</span></span>
                       <span className="shrink-0 font-mono text-xs text-faint">{r.kind.toUpperCase()} · {formatBytes(r.byteSize)}</span>
-                    </a>
+                    </button>
                     <button
                       type="button" aria-label={isLast ? "Delete file (removes the whole job)" : "Delete file"}
                       title={isLast ? "Delete (removes the whole job)" : "Delete file"}

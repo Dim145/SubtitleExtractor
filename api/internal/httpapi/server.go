@@ -96,7 +96,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/jobs/{id}/results", s.handleJobResults)
 			r.Post("/jobs/{id}/results", s.handleSaveResult)
 			r.Delete("/jobs/{id}/results/{resultId}", s.handleDeleteResult)
+			r.Get("/jobs/{id}/results/{resultId}/download", s.handleDownloadResult)
 			r.Get("/jobs/{id}/video", s.handleJobVideo)
+			r.Get("/jobs/{id}/video/raw", s.handleVideoStream)
 			r.Get("/jobs/{id}/events", s.handleJobEvents)
 		})
 
