@@ -5,17 +5,17 @@
 // VideoToolbox in Safari/Chrome).
 import { WebDemuxer } from "web-demuxer";
 
-// The full ffmpeg loader (supports mkv/hevc/etc. demuxing), served SAME-ORIGIN
+// The WASM demuxer binary (supports mkv/hevc/etc. demuxing), served SAME-ORIGIN
 // by the web-demuxer-assets Vite plugin (see vite.config.ts). Must not be a CDN
 // URL — that's CORS-blocked and fails offline / behind nginx.
 //
-// web-demuxer spawns its worker from a `data:` URL and then does
-// `import(wasmLoaderPath)` *inside* that worker. A `data:` URL has no base to
-// resolve a root-relative path against, so a path like "/web-demuxer/ffmpeg.js"
-// throws "error resolving module specifier" in Firefox (Chrome is lenient). Pass
-// a fully-qualified absolute URL so resolution never depends on the worker base.
-function wasmLoaderUrl(): string {
-  return new URL("/web-demuxer/ffmpeg.js", location.href).href;
+// web-demuxer spawns its worker from a `data:`/`blob:` URL and resolves the wasm
+// path against the worker's base. A `data:`/`blob:` URL has no usable base to
+// resolve a root-relative path against, so a path like "/web-demuxer/..." can
+// throw a module-resolution error in some browsers. Pass a fully-qualified
+// absolute URL so resolution never depends on the worker base.
+function wasmFileUrl(): string {
+  return new URL("/web-demuxer/web-demuxer.wasm", location.href).href;
 }
 
 export function webCodecsAvailable(): boolean {
@@ -30,7 +30,7 @@ export class FrameDecoder {
   duration = 0;
 
   async init(file: File): Promise<ImageBitmap> {
-    const d = new WebDemuxer({ wasmLoaderPath: wasmLoaderUrl() });
+    const d = new WebDemuxer({ wasmFilePath: wasmFileUrl() });
     await d.load(file);
     this.demuxer = d;
     try {
@@ -45,8 +45,8 @@ export class FrameDecoder {
   async frameAt(time: number): Promise<ImageBitmap> {
     const d = this.demuxer;
     if (!d) throw new Error("decoder not initialized");
-    const config = await d.getVideoDecoderConfig();
-    const chunk = await d.seekEncodedVideoChunk(Math.max(0, time));
+    const config = await d.getDecoderConfig("video");
+    const chunk = await d.seek("video", Math.max(0, time));
     const frame: VideoFrame = await new Promise((resolve, reject) => {
       const dec = new VideoDecoder({
         output: (f) => resolve(f),

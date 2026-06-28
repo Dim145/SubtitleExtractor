@@ -4,19 +4,21 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-// Serve web-demuxer's ffmpeg WASM demuxer SAME-ORIGIN (the package defaults to a
-// jsdelivr CDN URL, which is CORS-blocked and breaks offline/self-hosted installs).
-// Dev: a middleware streams the files; build: they're emitted into dist/web-demuxer/.
+// Serve web-demuxer's WASM binary SAME-ORIGIN (the package defaults to a jsdelivr
+// CDN URL, which is CORS-blocked and breaks offline/self-hosted installs).
+// v4 bundles the JS glue into the package and only fetches the .wasm at runtime,
+// so we only need to serve web-demuxer.wasm (no separate ffmpeg.js anymore).
+// Dev: a middleware streams the file; build: it's emitted into dist/web-demuxer/.
 function webDemuxerAssets(): Plugin {
-  const files = ["ffmpeg.js", "ffmpeg.wasm"];
+  const files = ["web-demuxer.wasm"];
   const dir = (f: string) => fileURLToPath(new URL(`node_modules/web-demuxer/dist/wasm-files/${f}`, import.meta.url));
   return {
     name: "web-demuxer-assets",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        const m = req.url?.match(/^\/web-demuxer\/(ffmpeg\.js|ffmpeg\.wasm)(\?.*)?$/);
+        const m = req.url?.match(/^\/web-demuxer\/(web-demuxer\.wasm)(\?.*)?$/);
         if (!m) return next();
-        res.setHeader("Content-Type", m[1].endsWith(".wasm") ? "application/wasm" : "text/javascript");
+        res.setHeader("Content-Type", "application/wasm");
         res.end(readFileSync(dir(m[1])));
       });
     },
