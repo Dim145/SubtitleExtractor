@@ -11,7 +11,7 @@ export function MediaStage({
   player, stageRef, overlay, controls = true, unavailable, className,
 }: {
   player: SourcePlayer;
-  stageRef?: RefObject<HTMLDivElement>;
+  stageRef?: RefObject<HTMLDivElement | null>;
   overlay?: ReactNode;
   controls?: boolean;
   /** Replaces the default "preview unavailable" message in error mode. */

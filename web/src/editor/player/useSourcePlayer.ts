@@ -21,7 +21,7 @@ export interface SourcePlayer {
   /** Source for the <video> tag (object URL for a File, or the passed URL). */
   videoSrc: string | undefined;
   attachVideo: (el: HTMLVideoElement | null) => void;
-  canvasRef: React.RefObject<HTMLCanvasElement>;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
   play: () => void;
   pause: () => void;
   toggle: () => void;
