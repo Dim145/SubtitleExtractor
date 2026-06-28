@@ -72,12 +72,21 @@ export interface Zone {
   h: number;
 }
 
+// A post-OCR find→replace rule applied by workers to cue text after merging.
+export interface OCRSubstitutionRule {
+  find: string;
+  replace: string;
+  isRegex: boolean;
+  applyTo: string; // "all" or a language code (e.g. "fr")
+}
+
 export interface SiteSettings {
   registrationEnabled: boolean;
   defaultOcrBackend: string;
   defaultFps: number;
   defaultMinConfidence: number;
   workerDefaults: Record<string, unknown>;
+  ocrSubstitutionRules: OCRSubstitutionRule[];
 }
 
 // A typed field descriptor a worker advertises so the admin can render a form.

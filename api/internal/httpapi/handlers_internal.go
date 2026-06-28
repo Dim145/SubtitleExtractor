@@ -44,11 +44,16 @@ func (s *Server) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if st, err := s.settings.Get(r.Context()); err == nil {
 		defaults = *st
 	}
+	rules := defaults.OCRSubstitutionRules
+	if len(rules) == 0 {
+		rules = json.RawMessage(`[]`)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"workerId":      wk.ID,
-		"enabled":       wk.Enabled,
-		"configVersion": wk.ConfigVersion,
-		"config":        json.RawMessage(workers.EffectiveConfig(defaults.WorkerDefaults, wk.Config)),
+		"workerId":             wk.ID,
+		"enabled":              wk.Enabled,
+		"configVersion":        wk.ConfigVersion,
+		"config":               json.RawMessage(workers.EffectiveConfig(defaults.WorkerDefaults, wk.Config)),
+		"ocrSubstitutionRules": rules,
 	})
 }
 

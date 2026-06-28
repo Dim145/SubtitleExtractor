@@ -44,6 +44,7 @@ def main() -> None:
                 was_disabled = False
 
             wcfg = hb.get("config") or {}
+            sub_rules = hb.get("ocrSubstitutionRules") or []
             try:
                 poll = float(wcfg.get("poll_interval") or cfg.poll_interval)
             except (TypeError, ValueError):
@@ -74,7 +75,7 @@ def main() -> None:
             job_id = job["id"]
             log.info("claimed job %s (%s)", job_id, job.get("sourceFilename"))
             try:
-                process_job(cfg, client, job, input_url, wcfg)
+                process_job(cfg, client, job, input_url, wcfg, sub_rules)
                 client.complete(job_id, success=True)
                 log.info("job %s succeeded", job_id)
             except JobCanceled:

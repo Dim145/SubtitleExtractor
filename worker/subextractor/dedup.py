@@ -86,6 +86,47 @@ def alignment_from_bbox(
     return base + col
 
 
+def apply_substitution_rules(
+    cues: list[Cue],
+    rules: list[dict] | None,
+    language: str | None = None,
+) -> list[Cue]:
+    """Apply admin-defined post-OCR substitution rules to each cue's text.
+
+    Each rule is {find, replace, isRegex, applyTo}; applyTo is "all" or a language
+    code. Literal rules use str.replace; regex rules use re.sub (invalid patterns
+    are skipped defensively — the admin UI validates them up front). Mutates and
+    returns the cues."""
+    if not rules:
+        return cues
+    compiled: list[tuple[bool, object, str]] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        find = rule.get("find") or ""
+        if not find:
+            continue
+        repl = rule.get("replace") or ""
+        apply_to = rule.get("applyTo") or rule.get("apply_to") or "all"
+        if apply_to and apply_to != "all" and (not language or apply_to != language):
+            continue
+        is_regex = bool(rule.get("isRegex") or rule.get("is_regex"))
+        if is_regex:
+            try:
+                compiled.append((True, re.compile(find), repl))
+            except re.error:
+                continue
+        else:
+            compiled.append((False, find, repl))
+
+    for c in cues:
+        text = c.text
+        for is_regex, pat, repl in compiled:
+            text = pat.sub(repl, text) if is_regex else text.replace(pat, repl)
+        c.text = text
+    return cues
+
+
 def _normalize(text: str) -> str:
     """Conservative post-OCR cleanup: trim each line, collapse runs of spaces,
     drop blank lines. Intentionally does NOT alter characters (no spell-fixing)."""

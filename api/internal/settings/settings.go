@@ -15,6 +15,9 @@ type Settings struct {
 	DefaultFPS           float64         `json:"defaultFps"`
 	DefaultMinConfidence float64         `json:"defaultMinConfidence"`
 	WorkerDefaults       json.RawMessage `json:"workerDefaults"`
+	// OCRSubstitutionRules is a JSON array of {find, replace, isRegex, applyTo}
+	// applied by workers to cue text after merging (global, inter-worker).
+	OCRSubstitutionRules json.RawMessage `json:"ocrSubstitutionRules"`
 }
 
 type Repo struct {
@@ -28,15 +31,18 @@ func (r *Repo) Get(ctx context.Context) (*Settings, error) {
 	var s Settings
 	err := r.pool.QueryRow(ctx, `
 		SELECT registration_enabled, default_ocr_backend, default_fps,
-		       default_min_confidence, worker_defaults
+		       default_min_confidence, worker_defaults, ocr_substitution_rules
 		FROM app_settings WHERE id = 1`).
 		Scan(&s.RegistrationEnabled, &s.DefaultOCRBackend, &s.DefaultFPS,
-			&s.DefaultMinConfidence, &s.WorkerDefaults)
+			&s.DefaultMinConfidence, &s.WorkerDefaults, &s.OCRSubstitutionRules)
 	if err != nil {
 		return nil, err
 	}
 	if len(s.WorkerDefaults) == 0 {
 		s.WorkerDefaults = json.RawMessage(`{}`)
+	}
+	if len(s.OCRSubstitutionRules) == 0 {
+		s.OCRSubstitutionRules = json.RawMessage(`[]`)
 	}
 	return &s, nil
 }
@@ -47,6 +53,10 @@ func (r *Repo) Update(ctx context.Context, s *Settings) error {
 	if len(wd) == 0 {
 		wd = json.RawMessage(`{}`)
 	}
+	rules := s.OCRSubstitutionRules
+	if len(rules) == 0 {
+		rules = json.RawMessage(`[]`)
+	}
 	_, err := r.pool.Exec(ctx, `
 		UPDATE app_settings SET
 			registration_enabled = $1,
@@ -54,8 +64,9 @@ func (r *Repo) Update(ctx context.Context, s *Settings) error {
 			default_fps = $3,
 			default_min_confidence = $4,
 			worker_defaults = $5,
+			ocr_substitution_rules = $6,
 			updated_at = now()
 		WHERE id = 1`,
-		s.RegistrationEnabled, s.DefaultOCRBackend, s.DefaultFPS, s.DefaultMinConfidence, wd)
+		s.RegistrationEnabled, s.DefaultOCRBackend, s.DefaultFPS, s.DefaultMinConfidence, wd, rules)
 	return err
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, APIError } from "../../api/client";
-import type { SiteSettings } from "../../api/types";
+import type { OCRSubstitutionRule, SiteSettings } from "../../api/types";
 import { Card, Spinner } from "../../components/ui";
 
 export function Settings() {
@@ -14,6 +14,8 @@ export function Settings() {
   const [defaultFps, setDefaultFps] = useState("4");
   const [defaultMinConfidence, setDefaultMinConfidence] = useState("0.5");
   const [workerDefaultsText, setWorkerDefaultsText] = useState("{}");
+  // Preserved as-is (edited on the dedicated Substitutions page).
+  const [ocrRules, setOcrRules] = useState<OCRSubstitutionRule[]>([]);
 
   function load(s: SiteSettings) {
     setRegistrationEnabled(s.registrationEnabled);
@@ -21,6 +23,7 @@ export function Settings() {
     setDefaultFps(String(s.defaultFps));
     setDefaultMinConfidence(String(s.defaultMinConfidence));
     setWorkerDefaultsText(JSON.stringify(s.workerDefaults ?? {}, null, 2));
+    setOcrRules(s.ocrSubstitutionRules ?? []);
   }
 
   useEffect(() => {
@@ -64,6 +67,7 @@ export function Settings() {
         defaultFps: Number(defaultFps),
         defaultMinConfidence: Number(defaultMinConfidence),
         workerDefaults,
+        ocrSubstitutionRules: ocrRules,
       });
       load(next);
       setSaved(true);

@@ -8,6 +8,7 @@ import { JobDetail } from "./pages/JobDetail";
 import { Login } from "./pages/Login";
 import { AdminLayout } from "./pages/admin/AdminLayout";
 import { Settings } from "./pages/admin/Settings";
+import { Substitutions } from "./pages/admin/Substitutions";
 import { Users } from "./pages/admin/Users";
 import { Workers } from "./pages/admin/Workers";
 
@@ -37,6 +38,7 @@ function Gate() {
           <Route path="users" element={<Users />} />
           <Route path="settings" element={<Settings />} />
           <Route path="workers" element={<Workers />} />
+          <Route path="substitutions" element={<Substitutions />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

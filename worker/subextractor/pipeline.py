@@ -20,6 +20,7 @@ from .config import Config
 from .dedup import (
     Cue,
     alignment_from_bbox,
+    apply_substitution_rules,
     mask_diff_ratio,
     merge_into_cues,
     text_mask,
@@ -76,7 +77,8 @@ def _resolve_zones(params: dict, wcfg: dict, width: int, height: int) -> list[tu
     return rects
 
 
-def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: str, wcfg: dict | None = None) -> None:
+def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: str,
+                wcfg: dict | None = None, substitution_rules: list | None = None) -> None:
     job_id = job["id"]
     params = _as_dict(job.get("params"))
     wcfg = wcfg or {}
@@ -170,6 +172,9 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
                 )
             )
         cues.sort(key=lambda c: c.start)
+        if substitution_rules:
+            apply_substitution_rules(cues, substitution_rules, language)
+            client.log(job_id, f"applied {len(substitution_rules)} substitution rule(s)")
         client.log(job_id, f"produced {len(cues)} subtitle cues")
         if not cues:
             client.log(job_id, "no subtitles detected", level="warn")
