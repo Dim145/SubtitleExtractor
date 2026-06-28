@@ -117,21 +117,23 @@ func workerID(r *http.Request) string {
 func (s *Server) bindWorker(w http.ResponseWriter, r *http.Request, id string) bool {
 	job, err := s.jobs.Get(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "job not found")
+		// The job vanished (deleted/canceled out from under the worker). Reply
+		// with 409 — the same "stop now" signal as cancellation — so the worker
+		// aborts this job gracefully and returns to its claim loop, rather than
+		// hard-erroring on a 404. (Before this binding existed these posts were
+		// silent 0-row no-ops.)
+		writeError(w, http.StatusConflict, "job no longer exists")
 		return false
 	}
-	// claimed_by is set to the worker's X-Worker-Id at claim time. If the job
-	// has not been claimed, no worker may post against it.
-	if job.ClaimedBy == nil {
-		writeError(w, http.StatusConflict, "job is not claimed")
-		return false
-	}
-	// When the caller sends an identity, it must match the claiming worker.
-	// (Older workers that omit the header still can't target an *unclaimed*
-	// job thanks to the check above; a real worker always sends its id.)
-	if wid := workerID(r); wid != "" && wid != *job.ClaimedBy {
-		writeError(w, http.StatusForbidden, "job claimed by another worker")
-		return false
+	// Security: a worker may not mutate a job claimed by a *different* worker.
+	// claimed_by is set to the worker's X-Worker-Id at claim time. Unclaimed
+	// jobs (claimed_by nil) and workers that omit the header pass through — the
+	// goal here is only to stop cross-worker tampering, not to gate normal posts.
+	if job.ClaimedBy != nil {
+		if wid := workerID(r); wid != "" && wid != *job.ClaimedBy {
+			writeError(w, http.StatusForbidden, "job claimed by another worker")
+			return false
+		}
 	}
 	return true
 }
