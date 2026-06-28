@@ -21,6 +21,10 @@ export function useJob(id: string) {
   });
 }
 
+export function useJobResults(id: string) {
+  return useQuery({ queryKey: ["job-results", id], queryFn: () => api.jobResults(id) });
+}
+
 export function useWorkerAvailability() {
   return useQuery({
     queryKey: ["worker-availability"],
