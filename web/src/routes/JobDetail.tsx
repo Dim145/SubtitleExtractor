@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge, ProgressBar } from "@/components/StatusBadge";
 import { subtitleFilename, formatBytes } from "@/lib/format";
-import { sameOriginApiUrl } from "@/lib/url";
+import { downloadableUrl } from "@/lib/url";
 import { cn } from "@/lib/cn";
 
 const ACTIVE = ["queued", "claimed", "running"];
@@ -31,14 +31,8 @@ export function JobDetail() {
   // Download via the presigned URL; if that's unreachable (non-public bucket,
   // S3 signature/clock-skew), fall back to streaming through the API.
   async function downloadResult(r: { id: string; downloadUrl: string }, filename: string) {
-    const grab = async (url: string) => {
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error(String(res.status));
-      return res.blob();
-    };
-    let blob: Blob;
-    try { blob = await grab(sameOriginApiUrl(r.downloadUrl)); }
-    catch { blob = await grab(`/api/jobs/${id}/results/${r.id}/download`); }
+    const res = await fetch(downloadableUrl(r.downloadUrl, `/api/jobs/${id}/results/${r.id}/download`), { credentials: "include" });
+    const blob = await res.blob();
     const u = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = u; a.download = filename; a.click();

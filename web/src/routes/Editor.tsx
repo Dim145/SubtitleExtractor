@@ -13,7 +13,7 @@ import { MediaStage } from "@/editor/player/MediaStage";
 import {
   type Cue, parseSubtitles, displayTime, parseDisplayTime, newCue, toASS, toSRT, toVTT,
 } from "@/editor/subtitles";
-import { sameOriginApiUrl } from "@/lib/url";
+import { downloadableUrl } from "@/lib/url";
 import { subtitleFilename } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { useDialog } from "@/components/ui/useDialog";
@@ -54,7 +54,6 @@ export function Editor() {
   const [error, setError] = useState<string | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [videoUnavailable, setVideoUnavailable] = useState(false);
-  const [videoFellBack, setVideoFellBack] = useState(false);
 
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const cueListRef = useRef<HTMLDivElement>(null);
@@ -77,7 +76,7 @@ export function Editor() {
         const results = await api.jobResults(id);
         const pick = results.find((r) => r.kind === "ass") ?? results.find((r) => r.kind === "srt") ?? results.find((r) => r.kind === "vtt");
         if (!pick) { if (!stop) { setError("This job has no subtitles to edit yet."); setLoading(false); } return; }
-        const text = await fetch(sameOriginApiUrl(pick.downloadUrl), { credentials: "include" }).then((r) => r.text());
+        const text = await fetch(downloadableUrl(pick.downloadUrl, `/api/jobs/${id}/results/${pick.id}/download`), { credentials: "include" }).then((r) => r.text());
         const parsed = parseSubtitles(text, pick.kind);
         if (stop) return;
         setSourceResultId(pick.id);
@@ -99,11 +98,10 @@ export function Editor() {
     let stop = false;
     setMediaUrl(null);
     setVideoUnavailable(false);
-    setVideoFellBack(false);
     (async () => {
       try {
         const info = await api.jobVideo(id);
-        if (!stop) setMediaUrl(sameOriginApiUrl(info.url));
+        if (!stop) setMediaUrl(downloadableUrl(info.url, `/api/jobs/${id}/video/raw`));
       } catch {
         if (!stop) setVideoUnavailable(true); // no source → editing still works
       }
@@ -115,16 +113,6 @@ export function Editor() {
   useEffect(() => {
     if ((player.mode === "video" || player.mode === "canvas") && player.dims.width) setDims(player.dims);
   }, [player.mode, player.dims]);
-
-  // If the presigned video URL can't be played (e.g. non-public S3 bucket or an
-  // S3 signature/clock-skew issue), fall back once to streaming it through the
-  // API (same-origin, Range-capable).
-  useEffect(() => {
-    if (player.mode === "error" && !videoFellBack && mediaUrl) {
-      setVideoFellBack(true);
-      setMediaUrl(`/api/jobs/${id}/video/raw`);
-    }
-  }, [player.mode, videoFellBack, mediaUrl, id]);
 
   const wave = useWaveform({
     media: player.mediaEl, container: waveEl, cues, selectedId,
