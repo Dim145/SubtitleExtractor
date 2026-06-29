@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Save, Download, Check, X } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, Download, Check, X, ChevronDown, ArrowUpToLine, ArrowDownToLine } from "lucide-react";
 import { useJob } from "@/api/jobs";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -54,9 +54,15 @@ export function Editor() {
   const [error, setError] = useState<string | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [videoUnavailable, setVideoUnavailable] = useState(false);
+  // Pending in-point for mark-in/out cue creation (I = mark in, O = mark out).
+  const [markIn, setMarkIn] = useState<number | null>(null);
+  const markInRef = useRef<number | null>(null);
+  markInRef.current = markIn;
+  const [addMenu, setAddMenu] = useState(false);
 
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const cueListRef = useRef<HTMLDivElement>(null);
+  const addRef = useRef<HTMLDivElement>(null);
 
   // One unified player (native <video>, or WebCodecs frames for MKV/HEVC).
   const player = useSourcePlayer({ url: mediaUrl });
@@ -118,6 +124,7 @@ export function Editor() {
     media: player.mediaEl, container: waveEl, cues, selectedId,
     onUpdate: (cid, start, end) => { setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, start, end } : c))); setDirty(true); },
     onSelect: (cid) => { setSelectedId(cid); const c = cues.find((x) => x.id === cid); if (c) player.seek(c.start); },
+    onCreate: (start, end) => addCueRange(start, end),
   });
 
   // active cue (under the playhead) — drives the caption overlay + auto-scroll.
@@ -129,10 +136,45 @@ export function Editor() {
   const activeCue = cues.find((c) => c.id === activeId);
 
   function patch(cid: string, p: Partial<Cue>) { setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, ...p } : c))); setDirty(true); }
-  function addCue() {
-    const c = newCue(currentTime, currentTime + 2);
+
+  /** Focus (and scroll to) a cue's text field once its row has rendered. */
+  function focusCue(id: string) {
+    requestAnimationFrame(() => {
+      const el = cueListRef.current?.querySelector<HTMLTextAreaElement>(`[data-cue="${id}"] textarea`);
+      el?.focus();
+      el?.scrollIntoView({ block: "nearest" });
+    });
+  }
+  /** Create a cue spanning [start, end], select it, and focus its text. */
+  function addCueRange(start: number, end: number) {
+    const s = Math.max(0, start);
+    const e = Math.max(end, s + 0.3); // keep cues at least readable-length
+    const c = newCue(s, e);
     setCues((prev) => [...prev, c].sort((a, b) => a.start - b.start));
-    setSelectedId(c.id); setDirty(true);
+    setSelectedId(c.id); setDirty(true); focusCue(c.id);
+  }
+  /** Add at the playhead, clamped so it doesn't overrun the next cue. */
+  function addCueAtPlayhead() {
+    const t = timeRef.current;
+    const next = cues.filter((c) => c.start > t).sort((a, b) => a.start - b.start)[0];
+    addCueRange(t, next ? Math.min(t + 2, next.start) : t + 2);
+  }
+  /** Insert into the gap after `beforeEnd` (afterStart = next cue's start, null at the end). */
+  function insertBetween(beforeEnd: number, afterStart: number | null) {
+    addCueRange(beforeEnd, afterStart != null ? Math.min(beforeEnd + 2, afterStart) : beforeEnd + 2);
+  }
+  /** Insert above/below the selected cue (falls back to the playhead). */
+  function insertRelative(dir: "above" | "below") {
+    setAddMenu(false);
+    const sorted = [...cues].sort((a, b) => a.start - b.start);
+    const idx = sorted.findIndex((c) => c.id === selectedId);
+    if (idx < 0) return addCueAtPlayhead();
+    const sel = sorted[idx];
+    if (dir === "below") { insertBetween(sel.end, sorted[idx + 1]?.start ?? null); return; }
+    const prev = sorted[idx - 1];
+    let start = prev ? Math.max(prev.end, sel.start - 2) : Math.max(0, sel.start - 2);
+    if (start >= sel.start) start = Math.max(0, sel.start - 0.5);
+    addCueRange(start, sel.start);
   }
   function delCue(cid: string) { setCues((prev) => prev.filter((c) => c.id !== cid)); setDirty(true); }
 
@@ -177,6 +219,15 @@ export function Editor() {
       if (["INPUT", "TEXTAREA"].includes(t.tagName) || t.isContentEditable) return;
       if (e.key === "[" && selectedId) { e.preventDefault(); patch(selectedId, { start: timeRef.current }); return; }
       if (e.key === "]" && selectedId) { e.preventDefault(); patch(selectedId, { end: timeRef.current }); return; }
+      if (e.key === "n" || e.key === "N") { e.preventDefault(); addCueAtPlayhead(); return; }
+      if (e.key === "i" || e.key === "I") { e.preventDefault(); setMarkIn(timeRef.current); return; }
+      if (e.key === "o" || e.key === "O") {
+        e.preventDefault();
+        const inPt = markInRef.current;
+        if (inPt != null && timeRef.current > inPt) { addCueRange(inPt, timeRef.current); setMarkIn(null); }
+        return;
+      }
+      if (e.key === "Escape" && markInRef.current != null) { setMarkIn(null); return; }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         if (!cues.length) return;
         e.preventDefault();
@@ -189,6 +240,14 @@ export function Editor() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [selectedId, cues, player.seek]);
+
+  // Close the add-menu when clicking outside it.
+  useEffect(() => {
+    if (!addMenu) return;
+    const onDoc = (e: MouseEvent) => { if (!addRef.current?.contains(e.target as Node)) setAddMenu(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [addMenu]);
 
   const caption = activeCue ? (
     <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
@@ -213,8 +272,38 @@ export function Editor() {
       <div className="overflow-hidden rounded-xl border border-border bg-surface">
         {/* toolbar */}
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-2 px-3 py-2">
-          <Button variant="default" size="sm" onClick={addCue}><Plus className="size-3.5" /> Cue</Button>
+          <div ref={addRef} className="relative flex">
+            <Button variant="default" size="sm" onClick={addCueAtPlayhead} className="rounded-r-none" title="Add a cue at the playhead (N)">
+              <Plus className="size-3.5" /> Cue
+            </Button>
+            <Button
+              variant="default" size="sm" aria-label="More ways to add a cue" aria-haspopup="menu" aria-expanded={addMenu}
+              onClick={() => setAddMenu((o) => !o)} className="rounded-l-none border-l-0 px-1.5"
+            ><ChevronDown className={cn("size-3.5 transition-transform", addMenu && "rotate-180")} /></Button>
+            {addMenu && (
+              <div role="menu" className="absolute left-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-lg border border-border-strong bg-surface py-1 shadow-xl">
+                <button role="menuitem" type="button" onClick={() => { setAddMenu(false); addCueAtPlayhead(); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-surface-2">
+                  <Plus className="size-3.5 text-accent" /> Add at playhead <kbd className="ml-auto font-mono text-[10px] text-faint">N</kbd>
+                </button>
+                <button role="menuitem" type="button" disabled={!selectedId} onClick={() => insertRelative("above")}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-surface-2 disabled:opacity-40 disabled:hover:bg-transparent">
+                  <ArrowUpToLine className="size-3.5 text-accent" /> Insert above selected
+                </button>
+                <button role="menuitem" type="button" disabled={!selectedId} onClick={() => insertRelative("below")}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-surface-2 disabled:opacity-40 disabled:hover:bg-transparent">
+                  <ArrowDownToLine className="size-3.5 text-accent" /> Insert below selected
+                </button>
+              </div>
+            )}
+          </div>
           <Button variant="default" size="sm" disabled={!selectedId} onClick={() => selectedId && delCue(selectedId)}><Trash2 className="size-3.5" /> Delete</Button>
+          {markIn != null && (
+            <span className="flex items-center gap-1.5 rounded-lg border border-amber/40 bg-amber/10 px-2 py-1 text-xs text-amber">
+              <span className="size-1.5 rounded-full bg-amber" /> in {displayTime(markIn).slice(3)} · press <kbd className="font-mono">O</kbd>
+              <button type="button" aria-label="Clear mark-in" onClick={() => setMarkIn(null)} className="ml-0.5 grid size-4 place-items-center rounded hover:bg-amber/20"><X className="size-3" /></button>
+            </span>
+          )}
           <span className="mx-1 h-5 w-px bg-border" />
           <select value={format} onChange={(e) => setFormat(e.target.value as Format)} className="h-8 rounded-lg border border-border-strong bg-surface px-2 text-[13px]">
             <option value="ass">ASS</option><option value="srt">SRT</option><option value="vtt">VTT</option>
@@ -267,52 +356,79 @@ export function Editor() {
                 <div className="grid place-items-center py-16"><Spinner className="size-5" /></div>
               ) : error ? (
                 <p className="px-3 py-10 text-center text-sm text-muted">{error}</p>
+              ) : cues.length === 0 ? (
+                <div className="grid place-items-center px-6 py-16 text-center">
+                  <div className="grid size-12 place-items-center rounded-2xl border border-accent/30 bg-accent/10 text-accent"><Plus className="size-6" /></div>
+                  <div className="mt-3 text-sm font-medium">Add your first subtitle</div>
+                  <p className="mx-auto mt-1 max-w-[16rem] text-xs text-muted">
+                    {player.mode === "video"
+                      ? <>Drag across the waveform to draw a cue, or press <kbd className="font-mono text-accent">N</kbd> to add one at the playhead.</>
+                      : <>Press <kbd className="font-mono text-accent">N</kbd> to add a cue at the playhead, or use the button below.</>}
+                  </p>
+                  <Button variant="primary" size="sm" className="mt-3" onClick={addCueAtPlayhead}><Plus className="size-3.5" /> Add subtitle</Button>
+                </div>
               ) : (
-                cues.map((c, i) => (
-                  <div
-                    key={c.id}
-                    data-cue={c.id}
-                    onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
-                    className={cn(
-                      "grid cursor-pointer grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-sm sm:grid-cols-[28px_88px_1fr_32px]",
-                      c.id === activeId && "bg-amber/10",
-                      c.id === selectedId ? "bg-accent/10 shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-surface-2",
-                    )}
-                  >
-                    <span className="pt-1 font-mono text-xs text-faint">{i + 1}</span>
-                    <div className="grid gap-1" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        defaultValue={displayTime(c.start)} key={`s-${c.id}-${c.start}`}
-                        inputMode="decimal" aria-label={`Cue ${i + 1} start time`}
-                        onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { start: v }); }}
-                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-amber hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
-                      />
-                      <input
-                        defaultValue={displayTime(c.end)} key={`e-${c.id}-${c.end}`}
-                        inputMode="decimal" aria-label={`Cue ${i + 1} end time`}
-                        onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { end: v }); }}
-                        className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-faint hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
-                      />
-                    </div>
-                    <textarea
-                      defaultValue={c.text} key={`t-${c.id}`} rows={2}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => patch(c.id, { text: e.target.value })}
-                      className="resize-none rounded border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-snug hover:border-border focus:border-accent focus:bg-surface-2"
-                    />
-                    <button
-                      type="button" title="Delete cue" aria-label={`Delete cue ${i + 1}`}
-                      onClick={(e) => { e.stopPropagation(); delCue(c.id); }}
-                      className="grid size-9 self-start place-items-center rounded text-faint transition hover:bg-err/15 hover:text-err sm:size-7"
-                    ><X className="size-4" /></button>
-                  </div>
-                ))
+                <>
+                  {cues.map((c, i) => (
+                    <Fragment key={c.id}>
+                      <div
+                        data-cue={c.id}
+                        onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
+                        className={cn(
+                          "grid cursor-pointer grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-sm sm:grid-cols-[28px_88px_1fr_32px]",
+                          c.id === activeId && "bg-amber/10",
+                          c.id === selectedId ? "bg-accent/10 shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-surface-2",
+                        )}
+                      >
+                        <span className="pt-1 font-mono text-xs text-faint">{i + 1}</span>
+                        <div className="grid gap-1" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            defaultValue={displayTime(c.start)} key={`s-${c.id}-${c.start}`}
+                            inputMode="decimal" aria-label={`Cue ${i + 1} start time`}
+                            onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { start: v }); }}
+                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-amber hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
+                          />
+                          <input
+                            defaultValue={displayTime(c.end)} key={`e-${c.id}-${c.end}`}
+                            inputMode="decimal" aria-label={`Cue ${i + 1} end time`}
+                            onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { end: v }); }}
+                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-faint hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
+                          />
+                        </div>
+                        <textarea
+                          defaultValue={c.text} key={`t-${c.id}`} rows={2}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => patch(c.id, { text: e.target.value })}
+                          className="resize-none rounded border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-snug hover:border-border focus:border-accent focus:bg-surface-2"
+                        />
+                        <button
+                          type="button" title="Delete cue" aria-label={`Delete cue ${i + 1}`}
+                          onClick={(e) => { e.stopPropagation(); delCue(c.id); }}
+                          className="grid size-9 self-start place-items-center rounded text-faint transition hover:bg-err/15 hover:text-err sm:size-7"
+                        ><X className="size-4" /></button>
+                      </div>
+                      {i < cues.length - 1 && (
+                        <div className="group/ins relative h-1.5">
+                          <button
+                            type="button" aria-label={`Insert a cue between ${i + 1} and ${i + 2}`}
+                            onClick={() => insertBetween(c.end, cues[i + 1].start)}
+                            className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full border border-accent/50 bg-surface px-2 py-0.5 text-[11px] text-accent opacity-0 transition focus-visible:opacity-100 group-hover/ins:opacity-100"
+                          ><Plus className="size-3" /> insert</button>
+                        </div>
+                      )}
+                    </Fragment>
+                  ))}
+                  <button
+                    type="button" onClick={addCueAtPlayhead}
+                    className="flex w-full items-center justify-center gap-2 border-t border-border px-3 py-3 text-[13px] font-medium text-accent transition hover:bg-accent/5"
+                  ><Plus className="size-4" /> Add subtitle</button>
+                </>
               )}
             </div>
           </div>
         </div>
       </div>
-      <p className="mt-2 text-xs text-muted">Cue list, waveform and video stay in sync · Space play/pause · ← → seek 5s · [ / ] set in/out · ↑ ↓ select · edits aren’t saved until you hit Save.</p>
+      <p className="mt-2 text-xs text-muted">Drag the waveform to draw a cue · N add at playhead · I / O mark in/out · [ / ] set in/out · ↑ ↓ select · Space play/pause · ← → seek 5s · edits aren’t saved until you hit Save.</p>
 
       {saveOpen && (
         <SaveDialog

@@ -1,5 +1,5 @@
 import type {
-  AuthConfig, Job, JobResult, LogEntry, SiteSettings, User, Worker,
+  AuthConfig, CleanupRun, Job, JobResult, LogEntry, SiteSettings, User, Worker,
 } from "./types";
 
 export class APIError extends Error {
@@ -61,7 +61,9 @@ export const api = {
   // use `.url` as the media source (see sameOriginApiUrl for local storage).
   jobVideo: (id: string) => request<{ url: string; filename: string }>(`/api/jobs/${id}/video`),
   cancelJob: (id: string) => request<void>(`/api/jobs/${id}/cancel`, { method: "POST" }),
+  rerunJob: (id: string) => request<Job>(`/api/jobs/${id}/rerun`, { method: "POST" }),
   deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: "DELETE" }),
+  deleteVideo: (id: string) => request<void>(`/api/jobs/${id}/video`, { method: "DELETE" }),
   createJob: (form: FormData) => request<Job>("/api/jobs", { method: "POST", body: form }),
   saveResult: (id: string, content: string, kind: string, opts: { name?: string; language?: string; resultId?: string } = {}) => {
     const form = new FormData();
@@ -87,6 +89,8 @@ export const api = {
 
     settings: () => request<SiteSettings>("/api/admin/settings"),
     saveSettings: (s: SiteSettings) => request<SiteSettings>("/api/admin/settings", jsonReq("PUT", s)),
+    videoCleanupRuns: () => request<CleanupRun[]>("/api/admin/video-cleanup/runs"),
+    runVideoCleanup: () => request<CleanupRun>("/api/admin/video-cleanup/run", { method: "POST" }),
 
     workers: () => request<Worker[]>("/api/admin/workers"),
     patchWorker: (id: string, patch: { enabled?: boolean; config?: Record<string, unknown> }) =>

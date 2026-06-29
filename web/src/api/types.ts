@@ -44,6 +44,7 @@ export interface Job {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  videoDeletedAt: string | null;
 }
 
 export interface JobResult {
@@ -88,6 +89,28 @@ export interface SiteSettings {
   defaultMinConfidence: number;
   workerDefaults: Record<string, unknown>;
   ocrSubstitutionRules: OCRSubstitutionRule[];
+  videoCleanupEnabled: boolean;
+  videoRetentionDays: number;
+  videoCleanupCron: string;
+}
+
+export interface CleanupFile {
+  jobId: string;
+  filename: string;
+  size: number;
+}
+
+export interface CleanupRun {
+  id: string;
+  startedAt: string;
+  finishedAt: string;
+  trigger: "scheduled" | "manual";
+  status: "success" | "partial" | "error";
+  checked: number;
+  deleted: number;
+  bytesFreed: number;
+  error: string | null;
+  files: CleanupFile[];
 }
 
 // A typed field descriptor a worker advertises so the admin can render a form.

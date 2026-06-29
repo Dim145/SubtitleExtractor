@@ -33,19 +33,22 @@ type Job struct {
 	CreatedAt      time.Time       `json:"createdAt"`
 	StartedAt      *time.Time      `json:"startedAt"`
 	FinishedAt     *time.Time      `json:"finishedAt"`
+	// VideoDeletedAt is set once the source video has been removed (manually or
+	// by the retention cleanup); when non-nil the job can't be re-run.
+	VideoDeletedAt *time.Time `json:"videoDeletedAt"`
 }
 
 // Result is a produced subtitle artifact.
 type Result struct {
-	ID        string    `json:"id"`
-	JobID     string    `json:"jobId"`
-	Kind      string    `json:"kind"`
-	StorageKey string   `json:"-"`
-	Name      *string   `json:"name"`
-	Language  *string   `json:"language"`
-	ByteSize  *int64    `json:"byteSize"`
-	SHA256    *string   `json:"sha256"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string    `json:"id"`
+	JobID      string    `json:"jobId"`
+	Kind       string    `json:"kind"`
+	StorageKey string    `json:"-"`
+	Name       *string   `json:"name"`
+	Language   *string   `json:"language"`
+	ByteSize   *int64    `json:"byteSize"`
+	SHA256     *string   `json:"sha256"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // LogEntry is one job log line.
@@ -67,13 +70,13 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 const jobColumns = `id, user_id, status, worker_class, source_filename, input_key, params,
 	progress_pct, progress_stage, claimed_by, attempt, error_message,
-	created_at, started_at, finished_at`
+	created_at, started_at, finished_at, video_deleted_at`
 
 func scanJob(row pgx.Row) (*Job, error) {
 	var j Job
 	err := row.Scan(&j.ID, &j.UserID, &j.Status, &j.WorkerClass, &j.SourceFilename, &j.InputKey,
 		&j.Params, &j.ProgressPct, &j.ProgressStage, &j.ClaimedBy, &j.Attempt, &j.ErrorMessage,
-		&j.CreatedAt, &j.StartedAt, &j.FinishedAt)
+		&j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.VideoDeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -311,6 +314,79 @@ func (r *Repo) Cancel(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// Rerun re-queues a finished job (succeeded/failed/canceled) for a fresh
+// extraction, resetting its run state. Refuses jobs whose video is gone. Returns
+// true if a job was actually re-queued. Existing results are kept untouched;
+// the new run appends its own.
+func (r *Repo) Rerun(ctx context.Context, id string) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE jobs SET
+			status = 'queued',
+			progress_pct = 0,
+			progress_stage = NULL,
+			error_message = NULL,
+			claimed_by = NULL,
+			claimed_at = NULL,
+			last_heartbeat = NULL,
+			started_at = NULL,
+			finished_at = NULL,
+			attempt = 0
+		WHERE id = $1 AND status IN ('succeeded','failed','canceled') AND video_deleted_at IS NULL`,
+		id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// MarkVideoDeleted records that a job's source video has been removed.
+func (r *Repo) MarkVideoDeleted(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE jobs SET video_deleted_at=now() WHERE id=$1 AND video_deleted_at IS NULL`, id)
+	return err
+}
+
+// VideoRef is a job id plus its source-video storage key and filename.
+type VideoRef struct {
+	ID             string
+	InputKey       string
+	SourceFilename string
+}
+
+// VideosForCleanup lists finished jobs whose source video is still present and
+// older than the cutoff — candidates for retention cleanup. Active jobs
+// (queued/claimed/running) are never returned: their video is still needed.
+func (r *Repo) VideosForCleanup(ctx context.Context, cutoff time.Time) ([]VideoRef, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, input_key, source_filename FROM jobs
+		WHERE video_deleted_at IS NULL
+		  AND status IN ('succeeded','failed','canceled')
+		  AND COALESCE(finished_at, created_at) < $1`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VideoRef
+	for rows.Next() {
+		var v VideoRef
+		if err := rows.Scan(&v.ID, &v.InputKey, &v.SourceFilename); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// CountPresentVideos counts finished jobs whose source video is still stored —
+// the full scope a cleanup run examines (the "checked" figure).
+func (r *Repo) CountPresentVideos(ctx context.Context) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx, `
+		SELECT count(*) FROM jobs
+		WHERE video_deleted_at IS NULL
+		  AND status IN ('succeeded','failed','canceled')`).Scan(&n)
+	return n, err
 }
 
 // Delete removes a job row (job_results and job_logs cascade).

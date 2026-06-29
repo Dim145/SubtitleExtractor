@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"subtitleextractor/internal/auth"
+	"subtitleextractor/internal/cleanup"
+	"subtitleextractor/internal/cronspec"
 	"subtitleextractor/internal/settings"
 )
 
@@ -114,11 +117,53 @@ func (s *Server) handleAdminPutSettings(w http.ResponseWriter, r *http.Request) 
 	if len(st.WorkerDefaults) == 0 {
 		st.WorkerDefaults = json.RawMessage(`{}`)
 	}
+	if st.VideoCleanupCron != "" {
+		if _, err := cronspec.Parse(st.VideoCleanupCron); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid cleanup schedule (expected a 5-field cron expression)")
+			return
+		}
+	}
 	if err := s.settings.Update(r.Context(), &st); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save settings")
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// handleAdminRunCleanup triggers a video-retention cleanup immediately and
+// returns the resulting run record.
+func (s *Server) handleAdminRunCleanup(w http.ResponseWriter, r *http.Request) {
+	if s.cleaner == nil {
+		writeError(w, http.StatusServiceUnavailable, "cleanup is not available")
+		return
+	}
+	run, err := s.cleaner.RunNow(r.Context())
+	if errors.Is(err, ErrCleanupBusy) {
+		writeError(w, http.StatusConflict, "a cleanup run is already in progress")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "cleanup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+// handleAdminListCleanupRuns returns the most recent cleanup runs (default 7).
+func (s *Server) handleAdminListCleanupRuns(w http.ResponseWriter, r *http.Request) {
+	if s.cleaner == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	runs, err := s.cleaner.ListRuns(r.Context(), 7)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list cleanup runs")
+		return
+	}
+	if runs == nil {
+		runs = []*cleanup.Run{} // serialize as [] not null
+	}
+	writeJSON(w, http.StatusOK, runs)
 }
 
 // --- workers -------------------------------------------------------------

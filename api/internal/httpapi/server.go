@@ -32,7 +32,12 @@ type Server struct {
 	oidc     *auth.OIDC // nil when OIDC is disabled
 	store    storage.Storage
 	hub      *events.Hub
+	cleaner  *VideoCleaner // set post-construction; nil until StartVideoCleaner
 }
+
+// SetVideoCleaner attaches the retention cleaner so admin endpoints can trigger
+// runs and read their history.
+func (s *Server) SetVideoCleaner(vc *VideoCleaner) { s.cleaner = vc }
 
 // NewServer constructs the server with its dependencies.
 func NewServer(cfg *config.Config, repo *users.Repo, jobRepo *jobs.Repo, settingsRepo *settings.Repo,
@@ -91,7 +96,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/jobs", s.handleListJobs)
 			r.Get("/jobs/{id}", s.handleGetJob)
 			r.Post("/jobs/{id}/cancel", s.handleCancelJob)
+			r.Post("/jobs/{id}/rerun", s.handleRerunJob)
 			r.Delete("/jobs/{id}", s.handleDeleteJob)
+			r.Delete("/jobs/{id}/video", s.handleDeleteVideo)
 			r.Get("/jobs/{id}/logs", s.handleJobLogs)
 			r.Get("/jobs/{id}/results", s.handleJobResults)
 			r.Post("/jobs/{id}/results", s.handleSaveResult)
@@ -111,6 +118,8 @@ func (s *Server) Router() http.Handler {
 			r.Delete("/admin/users/{id}", s.handleAdminDeleteUser)
 			r.Get("/admin/settings", s.handleAdminGetSettings)
 			r.Put("/admin/settings", s.handleAdminPutSettings)
+			r.Post("/admin/video-cleanup/run", s.handleAdminRunCleanup)
+			r.Get("/admin/video-cleanup/runs", s.handleAdminListCleanupRuns)
 			r.Get("/admin/workers", s.handleAdminListWorkers)
 			r.Patch("/admin/workers/{id}", s.handleAdminPatchWorker)
 			r.Delete("/admin/workers/{id}", s.handleAdminDeleteWorker)

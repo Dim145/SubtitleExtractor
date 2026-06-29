@@ -49,6 +49,28 @@ export function useCancelJob() {
   });
 }
 
+export function useRerunJob(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.rerunJob(id),
+    onSuccess: (job) => {
+      qc.setQueryData(["job", id], job);
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}
+
+export function useDeleteVideo(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.deleteVideo(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["job", id] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}
+
 export function useDeleteJob() {
   const qc = useQueryClient();
   return useMutation({

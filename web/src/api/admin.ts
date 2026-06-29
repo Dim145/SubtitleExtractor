@@ -38,6 +38,17 @@ export function useSaveSettings() {
   });
 }
 
+export function useCleanupRuns() {
+  return useQuery({ queryKey: ["admin", "cleanup-runs"], queryFn: api.admin.videoCleanupRuns });
+}
+export function useRunCleanup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.admin.runVideoCleanup(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "cleanup-runs"] }),
+  });
+}
+
 export function useAdminWorkers() {
   return useQuery({ queryKey: ["admin", "workers"], queryFn: api.admin.workers, refetchInterval: 10_000 });
 }

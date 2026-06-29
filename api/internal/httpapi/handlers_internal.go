@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"subtitleextractor/internal/events"
 	"subtitleextractor/internal/jobs"
@@ -233,7 +234,9 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 		}
 		if part.FormName() == "file" {
 			name := sanitizeFilename(part.FileName())
-			storageKey = "results/" + jobID + "/" + name
+			// Unique key prefix so re-running a job never overwrites the blob of a
+			// previously produced (possibly hand-edited) result — runs accumulate.
+			storageKey = "results/" + jobID + "/" + uuid.NewString() + "-" + name
 			if err := s.store.Put(r.Context(), storageKey, part, -1, "application/octet-stream"); err != nil {
 				part.Close()
 				writeError(w, http.StatusInternalServerError, "failed to store result")

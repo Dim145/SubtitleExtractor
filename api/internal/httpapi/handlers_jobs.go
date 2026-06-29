@@ -161,6 +161,10 @@ func (s *Server) handleJobVideo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if job.VideoDeletedAt != nil {
+		writeError(w, http.StatusNotFound, "source video has been deleted")
+		return
+	}
 	url, err := s.store.PresignGet(r.Context(), job.InputKey, downloadTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to sign video URL")
@@ -405,6 +409,67 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleRerunJob re-queues a finished job (succeeded/failed/canceled) for a
+// fresh extraction. Allowed only while the source video is still in storage.
+// Existing subtitle results are kept; the new run appends its own.
+func (s *Server) handleRerunJob(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.ownedJob(w, r)
+	if !ok {
+		return
+	}
+	if job.VideoDeletedAt != nil {
+		writeError(w, http.StatusConflict, "source video has been deleted; cannot re-run")
+		return
+	}
+	// Confirm the blob really exists (an external deletion may not be recorded).
+	if _, err := s.store.Stat(r.Context(), job.InputKey); err != nil {
+		_ = s.jobs.MarkVideoDeleted(r.Context(), job.ID)
+		writeError(w, http.StatusConflict, "source video is no longer available; cannot re-run")
+		return
+	}
+	requeued, err := s.jobs.Rerun(r.Context(), job.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to re-run job")
+		return
+	}
+	if !requeued {
+		writeError(w, http.StatusConflict, "job can't be re-run in its current state")
+		return
+	}
+	_ = s.jobs.AppendLog(r.Context(), job.ID, "info", "re-queued by user")
+	s.publishLog(job.ID, "info", "re-queued by user")
+	s.publishStatus(job.ID, "queued")
+	updated, err := s.jobs.Get(r.Context(), job.ID)
+	if err != nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleDeleteVideo removes only the source video blob, freeing storage while
+// keeping the job and its subtitle results. Refused while the job is active —
+// the worker still needs the video.
+func (s *Server) handleDeleteVideo(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.ownedJob(w, r)
+	if !ok {
+		return
+	}
+	switch job.Status {
+	case "queued", "claimed", "running":
+		writeError(w, http.StatusConflict, "job is still active; cancel it before deleting the video")
+		return
+	}
+	if job.VideoDeletedAt == nil {
+		_ = s.store.Delete(r.Context(), job.InputKey) // best-effort
+		if err := s.jobs.MarkVideoDeleted(r.Context(), job.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to delete video")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleDeleteJob removes a job from history along with its stored files
 // (input video + result subtitles). Running jobs are stopped as a side effect.
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
@@ -468,6 +533,10 @@ func (s *Server) handleDownloadResult(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVideoStream(w http.ResponseWriter, r *http.Request) {
 	job, ok := s.ownedJob(w, r)
 	if !ok {
+		return
+	}
+	if job.VideoDeletedAt != nil {
+		writeError(w, http.StatusNotFound, "source video has been deleted")
 		return
 	}
 	rc, err := s.store.Get(r.Context(), job.InputKey)

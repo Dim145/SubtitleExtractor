@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Link, useParams, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Download, Pencil, Trash2 } from "lucide-react";
-import { useJob, useJobResults, useDeleteResult } from "@/api/jobs";
+import { ArrowLeft, Download, Pencil, Trash2, RefreshCw, Film } from "lucide-react";
+import { useJob, useJobResults, useDeleteResult, useRerunJob, useDeleteVideo } from "@/api/jobs";
 import { useJobEvents } from "@/api/useJobEvents";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -19,6 +19,20 @@ export function JobDetail() {
   const results = useJobResults(id);
   const logs = useJobEvents(id);
   const delResult = useDeleteResult(id);
+  const rerun = useRerunJob(id);
+  const delVideo = useDeleteVideo(id);
+
+  function doRerun() {
+    rerun.mutate(undefined, {
+      onError: (e: unknown) => window.alert(e instanceof Error ? e.message : "Re-run failed"),
+    });
+  }
+  function removeVideo() {
+    if (!window.confirm("Delete the source video? Your subtitles are kept, but you won't be able to re-run or preview this job's video.")) return;
+    delVideo.mutate(undefined, {
+      onError: (e: unknown) => window.alert(e instanceof Error ? e.message : "Failed to delete video"),
+    });
+  }
 
   function removeResult(resultId: string, name: string, isLast: boolean) {
     const msg = isLast
@@ -69,6 +83,33 @@ export function JobDetail() {
       )}
       {job.status === "failed" && job.errorMessage && (
         <p className="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{job.errorMessage}</p>
+      )}
+
+      {!active && (
+        <div className="animate-in mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface p-4" style={{ animationDelay: "30ms" }}>
+          {job.videoDeletedAt ? (
+            <div className="flex items-center gap-2.5 text-sm text-muted">
+              <Film className="size-4 shrink-0 text-faint" />
+              <span>Source video removed <span className="text-faint">· subtitles kept · re-run unavailable</span></span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2.5 text-sm">
+              <Film className="size-4 shrink-0 text-accent" />
+              <span>Source video available <span className="text-faint">· re-run extraction or free up storage</span></span>
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Button variant="primary" size="sm" disabled={!!job.videoDeletedAt || rerun.isPending} onClick={doRerun}
+              title={job.videoDeletedAt ? "The source video has been deleted" : "Queue a fresh extraction (your subtitles are kept)"}>
+              {rerun.isPending ? <Spinner /> : <RefreshCw className="size-4" />} Re-run
+            </Button>
+            {!job.videoDeletedAt && (
+              <Button variant="danger" size="sm" disabled={delVideo.isPending} onClick={removeVideo}>
+                {delVideo.isPending ? <Spinner /> : <Trash2 className="size-4" />} Delete video
+              </Button>
+            )}
+          </div>
+        </div>
       )}
 
       <div className="mt-6 grid gap-4 md:grid-cols-[1.4fr_1fr]">

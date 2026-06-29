@@ -18,6 +18,11 @@ type Settings struct {
 	// OCRSubstitutionRules is a JSON array of {find, replace, isRegex, applyTo}
 	// applied by workers to cue text after merging (global, inter-worker).
 	OCRSubstitutionRules json.RawMessage `json:"ocrSubstitutionRules"`
+	// Video retention: a cron-scheduled job deletes source videos older than the
+	// retention window. Subtitles and job rows are kept.
+	VideoCleanupEnabled bool   `json:"videoCleanupEnabled"`
+	VideoRetentionDays  int    `json:"videoRetentionDays"`
+	VideoCleanupCron    string `json:"videoCleanupCron"`
 }
 
 type Repo struct {
@@ -31,10 +36,12 @@ func (r *Repo) Get(ctx context.Context) (*Settings, error) {
 	var s Settings
 	err := r.pool.QueryRow(ctx, `
 		SELECT registration_enabled, default_ocr_backend, default_fps,
-		       default_min_confidence, worker_defaults, ocr_substitution_rules
+		       default_min_confidence, worker_defaults, ocr_substitution_rules,
+		       video_cleanup_enabled, video_retention_days, video_cleanup_cron
 		FROM app_settings WHERE id = 1`).
 		Scan(&s.RegistrationEnabled, &s.DefaultOCRBackend, &s.DefaultFPS,
-			&s.DefaultMinConfidence, &s.WorkerDefaults, &s.OCRSubstitutionRules)
+			&s.DefaultMinConfidence, &s.WorkerDefaults, &s.OCRSubstitutionRules,
+			&s.VideoCleanupEnabled, &s.VideoRetentionDays, &s.VideoCleanupCron)
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +64,14 @@ func (r *Repo) Update(ctx context.Context, s *Settings) error {
 	if len(rules) == 0 {
 		rules = json.RawMessage(`[]`)
 	}
+	days := s.VideoRetentionDays
+	if days < 1 {
+		days = 1
+	}
+	cron := s.VideoCleanupCron
+	if cron == "" {
+		cron = "0 3 * * *"
+	}
 	_, err := r.pool.Exec(ctx, `
 		UPDATE app_settings SET
 			registration_enabled = $1,
@@ -65,8 +80,12 @@ func (r *Repo) Update(ctx context.Context, s *Settings) error {
 			default_min_confidence = $4,
 			worker_defaults = $5,
 			ocr_substitution_rules = $6,
+			video_cleanup_enabled = $7,
+			video_retention_days = $8,
+			video_cleanup_cron = $9,
 			updated_at = now()
 		WHERE id = 1`,
-		s.RegistrationEnabled, s.DefaultOCRBackend, s.DefaultFPS, s.DefaultMinConfidence, wd, rules)
+		s.RegistrationEnabled, s.DefaultOCRBackend, s.DefaultFPS, s.DefaultMinConfidence, wd, rules,
+		s.VideoCleanupEnabled, days, cron)
 	return err
 }

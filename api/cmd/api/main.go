@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"subtitleextractor/internal/auth"
+	"subtitleextractor/internal/cleanup"
 	"subtitleextractor/internal/config"
 	"subtitleextractor/internal/db"
 	"subtitleextractor/internal/httpapi"
@@ -74,6 +75,10 @@ func run() error {
 
 	// Re-queue jobs whose worker stopped heart-beating.
 	httpapi.StartStaleRequeuer(ctx, jobRepo, workerRepo, cfg.WorkerHeartbeatTimeout, log.Printf)
+
+	// Delete source videos past the admin-configured retention window.
+	cleanupRepo := cleanup.NewRepo(pool)
+	srv.SetVideoCleaner(httpapi.StartVideoCleaner(ctx, jobRepo, settingsRepo, cleanupRepo, store, log.Printf))
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
