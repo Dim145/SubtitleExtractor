@@ -5,12 +5,10 @@ Silicon). The NVIDIA worker will swap this for ffmpeg NVDEC in a later milestone
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
-import queue
-import re
 import subprocess
-import threading
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -26,6 +24,11 @@ class VideoInfo:
     height: int
     fps: float
     frame_count: int
+    # Presentation start of the video stream. A `-c copy` trim leaves the source
+    # PTS intact, so a trimmed clip often starts at e.g. 9.94s rather than 0. We
+    # preserve it so cue times match the source timeline (what players + the
+    # reference SRTs honor) instead of being shifted earlier.
+    start_time: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -43,7 +46,63 @@ class SampledFrame:
     interval: float = 0.0
 
 
-def probe(path: str) -> VideoInfo:
+def _parse_rate(r: str | None) -> float | None:
+    """Parse an ffprobe rate like '24000/1001' or '23.976' into fps."""
+    try:
+        if not r or r == "0/0":
+            return None
+        if "/" in r:
+            n, d = r.split("/", 1)
+            d = float(d)
+            return float(n) / d if d else None
+        return float(r)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _ffprobe(path: str) -> VideoInfo:
+    """Probe via ffprobe — reliable for duration/fps/dims even on VFR or
+    stream-copied (trimmed) files, where OpenCV's CAP_PROP_FRAME_COUNT/FPS lie."""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0", "-of", "json",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration,start_time:format=duration",
+        path,
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or "ffprobe failed").strip()[:200])
+    data = json.loads(out.stdout or "{}")
+    streams = data.get("streams") or []
+    if not streams:
+        raise RuntimeError("ffprobe: no video stream")
+    st = streams[0]
+    w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+    if w <= 0 or h <= 0:
+        raise RuntimeError("ffprobe: bad dimensions")
+    fps = _parse_rate(st.get("avg_frame_rate")) or _parse_rate(st.get("r_frame_rate")) or 25.0
+    dur = None
+    for v in (st.get("duration"), (data.get("format") or {}).get("duration")):
+        try:
+            dur = float(v)
+            break
+        except (TypeError, ValueError):
+            continue
+    nb_raw = str(st.get("nb_frames") or "")
+    if nb_raw.isdigit() and int(nb_raw) > 0:
+        nb = int(nb_raw)
+    elif dur:
+        nb = max(1, int(round(dur * fps)))
+    else:
+        raise RuntimeError("ffprobe: no duration or frame count")
+    try:
+        start = max(0.0, float(st.get("start_time")))
+    except (TypeError, ValueError):
+        start = 0.0
+    return VideoInfo(width=w, height=h, fps=fps, frame_count=nb, start_time=start)
+
+
+def _opencv_probe(path: str) -> VideoInfo:
     cap = cv2.VideoCapture(path)
     try:
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -57,6 +116,15 @@ def probe(path: str) -> VideoInfo:
         )
     finally:
         cap.release()
+
+
+def probe(path: str) -> VideoInfo:
+    """Video metadata, preferring ffprobe (accurate) with an OpenCV fallback."""
+    try:
+        return _ffprobe(path)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ffprobe failed (%s); falling back to OpenCV probe", e)
+        return _opencv_probe(path)
 
 
 def parse_crop(crop: str | None, width: int, height: int) -> tuple[int, int, int, int]:
@@ -82,6 +150,12 @@ def parse_crop(crop: str | None, width: int, height: int) -> tuple[int, int, int
 def sample_frames(path: str, sample_fps: float) -> Iterator[SampledFrame]:
     """Yield full frames at the requested sampling rate. Cropping to subtitle
     zones happens downstream so a single decode serves multiple zones."""
+    # Source start_time (0 for most files; non-zero for `-c copy` trims) so the
+    # OpenCV path emits source-timeline timestamps like the ffmpeg path.
+    try:
+        start = _ffprobe(path).start_time
+    except Exception:  # noqa: BLE001
+        start = 0.0
     cap = cv2.VideoCapture(path)
     try:
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -104,7 +178,7 @@ def sample_frames(path: str, sample_fps: float) -> Iterator[SampledFrame]:
                 ok, frame = cap.retrieve()
                 if ok and frame is not None:
                     yield SampledFrame(
-                        timestamp=frame_no / video_fps,  # true source PTS
+                        timestamp=start + frame_no / video_fps,  # source timeline
                         image=frame,
                         width=width,
                         height=height,
@@ -116,57 +190,37 @@ def sample_frames(path: str, sample_fps: float) -> Iterator[SampledFrame]:
 
 
 def sample_frames_ffmpeg(path: str, sample_fps: float, hwaccel: str = "cuda") -> Iterator[SampledFrame]:
-    """Sample frames via ffmpeg with hardware decode (NVDEC on NVIDIA).
+    """Sample frames via ffmpeg with hardware decode (NVDEC / VideoToolbox).
 
-    Decodes on the GPU (`-hwaccel cuda`) and pipes raw BGR frames. Requires an
-    ffmpeg build with the chosen hwaccel; callers should fall back to OpenCV.
+    Decodes on the GPU (`-hwaccel`) and pipes raw BGR frames. Requires an ffmpeg
+    build with the chosen hwaccel; callers should fall back to OpenCV.
+
+    Timeline: `setpts=PTS-STARTPTS` rebases decoding to t=0 (so `fps=` doesn't
+    sample a leading gap and the output is uniform — each frame is exactly
+    `idx/fps` apart, with no fragile stdout/stderr showinfo pairing). We then add
+    the stream's `start_time` back, so the emitted timestamps follow the SOURCE
+    timeline — matching players and the reference SRTs (a `-c copy` trim leaves a
+    non-zero start_time; subtracting it would make subtitles appear too early).
     """
     info = probe(path)
     w, h = info.width, info.height
     if w <= 0 or h <= 0:
         raise RuntimeError("could not determine video dimensions")
     interval = 1.0 / max(sample_fps, 0.1)
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "info"]
+    start = info.start_time
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if hwaccel:
         cmd += ["-hwaccel", hwaccel]
-    # `fps=` resamples to a uniform output rate; `showinfo` then prints each output
-    # frame's pts_time (seconds, derived from the SOURCE PTS) to stderr. We pair
-    # each raw stdout frame with its showinfo pts_time so the ffmpeg path reports
-    # true wall-clock timestamps that match the OpenCV path for the same video.
     cmd += [
         "-i", path,
-        "-vf", f"fps={sample_fps},showinfo",
+        "-vf", f"setpts=PTS-STARTPTS,fps={sample_fps}",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # showinfo writes to stderr asynchronously; drain it on a thread so a full
-    # stderr pipe can't deadlock the stdout read. pts_time values arrive in
-    # output-frame order; we queue them and pair by index.
-    pts_q: "queue.Queue[float]" = queue.Queue()
-    err_tail: list[str] = []
-    _pts_re = re.compile(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
-
-    def _drain_stderr() -> None:
-        assert proc.stderr is not None
-        for raw_line in iter(proc.stderr.readline, b""):
-            line = raw_line.decode("utf-8", "replace")
-            m = _pts_re.search(line)
-            if m:
-                try:
-                    pts_q.put(float(m.group(1)))
-                except ValueError:
-                    pass
-            elif "error" in line.lower():
-                err_tail.append(line.strip())
-                if len(err_tail) > 5:
-                    del err_tail[0]
-
-    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    err_thread.start()
-
     frame_size = w * h * 3
     idx = 0
+    err = ""
     try:
         assert proc.stdout is not None
         while True:
@@ -174,23 +228,19 @@ def sample_frames_ffmpeg(path: str, sample_fps: float, hwaccel: str = "cuda") ->
             if len(raw) < frame_size:
                 break
             frame = np.frombuffer(raw, np.uint8).reshape(h, w, 3)
-            # Prefer the real pts_time for this output frame; if showinfo lags or
-            # is unavailable, fall back to the uniform nominal time idx*interval.
-            try:
-                ts = pts_q.get(timeout=5.0)
-            except queue.Empty:
-                ts = idx * interval
-            yield SampledFrame(timestamp=ts, image=frame, width=w, height=h, interval=interval)
+            yield SampledFrame(timestamp=start + idx * interval, image=frame, width=w, height=h, interval=interval)
             idx += 1
     finally:
         if proc.poll() is None:
             proc.kill()
+        # With `-loglevel error` stderr is near-empty during a healthy decode, so
+        # reading it only at the end can't deadlock the stdout pump above.
+        try:
+            err = proc.stderr.read().decode("utf-8", "replace")[:300] if proc.stderr else ""
+        except Exception:  # noqa: BLE001
+            err = ""
         proc.wait()
-        err_thread.join(timeout=1.0)
     if idx == 0:
-        err = " | ".join(err_tail) if err_tail else (
-            proc.stderr.read().decode("utf-8", "replace")[:300] if proc.stderr and not proc.stderr.closed else ""
-        )
         raise RuntimeError(f"ffmpeg produced no frames (hwaccel={hwaccel}): {err}")
 
 

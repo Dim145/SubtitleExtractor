@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import threading
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -74,6 +75,37 @@ class Cue:
     text: str
     an: int  # ASS alignment 1-9
     frames: int = 1
+    confidence: float = 1.0  # mean OCR line score 0..1 across the cue's frames
+
+
+def focus_measure(gray: np.ndarray) -> float:
+    """Variance of the Laplacian — higher means sharper. Used to pick the
+    crispest frame of a stable subtitle group for OCR (avoids fade/blur frames)."""
+    if gray is None or gray.size == 0:
+        return 0.0
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def estimate_text_height(mask: np.ndarray) -> float:
+    """Median height (px) of bright connected components in the text mask — a
+    proxy for glyph height, used to scale a crop to an OCR-friendly size. Returns
+    0.0 when no text-like components are found."""
+    if mask is None or mask.size == 0:
+        return 0.0
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    h_img = mask.shape[0]
+    heights = []
+    for i in range(1, n):  # label 0 is the background
+        h = int(stats[i, cv2.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        # Keep glyph-like blobs: not specks, not a full-band-height artifact.
+        if area < 6 or h < 4 or h > 0.9 * h_img:
+            continue
+        heights.append(h)
+    if not heights:
+        return 0.0
+    heights.sort()
+    return float(heights[len(heights) // 2])
 
 
 def text_mask(gray: np.ndarray) -> np.ndarray:
@@ -108,6 +140,17 @@ def is_junk(text: str) -> bool:
         return True
     # No letters at all and very short → junk (e.g. "11", "0:0").
     return _HAS_LETTER.search(t) is None and len(t) <= 3
+
+
+def non_latin_ratio(text: str) -> float:
+    """Fraction of alphabetic characters that are NOT Latin script. Lets a Latin
+    job drop foreign-script hallucinations (e.g. a VLM emitting CJK like
+    '2024年世界经济论坛'), which are never real subtitles in that context."""
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return 0.0
+    nonlatin = sum(1 for ch in letters if not unicodedata.name(ch, "").startswith("LATIN"))
+    return nonlatin / len(letters)
 
 
 def alignment_from_bbox(
@@ -299,7 +342,8 @@ def merge_into_cues(
             continue
         if drop_junk and is_junk(text):
             continue
-        cues.append(Cue(start=g.start, end=end, text=text, an=g.an, frames=frames))
+        conf = (sum(g.confs) / len(g.confs)) if g.confs else 1.0
+        cues.append(Cue(start=g.start, end=end, text=text, an=g.an, frames=frames, confidence=conf))
 
     # Bridge tiny gaps between consecutive near-identical cues.
     merged: list[Cue] = []
@@ -309,8 +353,12 @@ def merge_into_cues(
             and fuzz.ratio(c.text, merged[-1].text) >= sim_threshold
             and c.start - merged[-1].end <= min_gap
         ):
-            merged[-1].end = c.end
-            merged[-1].frames += c.frames
+            prev = merged[-1]
+            total = prev.frames + c.frames
+            # Frame-weighted mean so the merged confidence reflects both spans.
+            prev.confidence = (prev.confidence * prev.frames + c.confidence * c.frames) / max(1, total)
+            prev.end = c.end
+            prev.frames = total
         else:
             merged.append(c)
     return merged

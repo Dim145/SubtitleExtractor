@@ -20,7 +20,11 @@ def get_backend(name: str, **opts: Any) -> OCRBackend:
         name = "paddleocr_vl"
 
     if name == "rapidocr":
-        key: tuple = ("rapidocr",)
+        key: tuple = (
+            "rapidocr", opts.get("ocr_version"), opts.get("det_model_type"),
+            opts.get("rec_model_type"), opts.get("rec_lang"), opts.get("det_box_thresh"),
+            opts.get("det_unclip_ratio"), opts.get("det_limit_side_len"), opts.get("text_score"),
+        )
     elif name == "ppocr":
         key = ("ppocr", opts.get("lang"), bool(opts.get("use_gpu")))
     elif name == "paddleocr_vl":
@@ -35,7 +39,16 @@ def get_backend(name: str, **opts: Any) -> OCRBackend:
     if name == "rapidocr":
         from .rapidocr import RapidOCRBackend
 
-        backend: OCRBackend = RapidOCRBackend()
+        backend: OCRBackend = RapidOCRBackend(
+            ocr_version=opts.get("ocr_version") or "PP-OCRv5",
+            det_model_type=opts.get("det_model_type") or "mobile",
+            rec_model_type=opts.get("rec_model_type") or "mobile",
+            rec_lang=opts.get("rec_lang") or "latin",
+            det_box_thresh=opts.get("det_box_thresh"),
+            det_unclip_ratio=opts.get("det_unclip_ratio"),
+            det_limit_side_len=opts.get("det_limit_side_len"),
+            text_score=opts.get("text_score"),
+        )
     elif name == "ppocr":
         from .ppocr import PPOCRBackend
 

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Save, Download, Check, X, ChevronDown, ArrowUpToLine, ArrowDownToLine } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, Download, Check, X, ChevronDown, ArrowUpToLine, ArrowDownToLine, TriangleAlert } from "lucide-react";
 import { useJob } from "@/api/jobs";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,10 @@ import { cn } from "@/lib/cn";
 import { useDialog } from "@/components/ui/useDialog";
 
 type Format = "ass" | "srt" | "vtt";
+
+// OCR mean line score below this is worth a manual review.
+const LOW_CONFIDENCE = 0.7;
+const isLowConfidence = (c: Cue) => c.confidence !== undefined && c.confidence < LOW_CONFIDENCE;
 
 /** Strip a trailing extension from a filename. */
 function stripExt(name: string): string {
@@ -134,6 +138,17 @@ export function Editor() {
     el?.scrollIntoView({ block: "nearest" });
   }, [activeId]);
   const activeCue = cues.find((c) => c.id === activeId);
+
+  // Cues OCR flagged as low-confidence — surfaced as a "N to review" chip.
+  const lowConfCount = useMemo(() => cues.filter(isLowConfidence).length, [cues]);
+  /** Select and scroll to the first low-confidence cue. */
+  function reviewFirstLowConf() {
+    const c = [...cues].sort((a, b) => a.start - b.start).find(isLowConfidence);
+    if (!c) return;
+    setSelectedId(c.id); player.seek(c.start);
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    cueListRef.current?.querySelector(`[data-cue="${c.id}"]`)?.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
+  }
 
   function patch(cid: string, p: Partial<Cue>) { setCues((prev) => prev.map((c) => (c.id === cid ? { ...c, ...p } : c))); setDirty(true); }
 
@@ -308,6 +323,15 @@ export function Editor() {
           <select value={format} onChange={(e) => setFormat(e.target.value as Format)} className="h-8 rounded-lg border border-border-strong bg-surface px-2 text-[13px]">
             <option value="ass">ASS</option><option value="srt">SRT</option><option value="vtt">VTT</option>
           </select>
+          {lowConfCount > 0 && (
+            <button
+              type="button" onClick={reviewFirstLowConf}
+              aria-label={`${lowConfCount} low-confidence ${lowConfCount === 1 ? "cue" : "cues"} to review — jump to the first`}
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-amber/40 bg-amber/10 px-2 text-xs text-amber transition hover:bg-amber/20"
+            >
+              <TriangleAlert className="size-3.5" /> {lowConfCount} to review
+            </button>
+          )}
           <div className="ml-auto flex items-center gap-2">
             <Button variant="default" size="sm" onClick={exportFile}><Download className="size-3.5" /> Export</Button>
             <Button variant="primary" size="sm" onClick={openSave} disabled={saving || loading || !!error}>
@@ -377,10 +401,23 @@ export function Editor() {
                         className={cn(
                           "grid cursor-pointer grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-sm sm:grid-cols-[28px_88px_1fr_32px]",
                           c.id === activeId && "bg-amber/10",
+                          // Faint amber left accent for OCR low-confidence cues (yields to the selected accent below).
+                          isLowConfidence(c) && c.id !== selectedId && "bg-amber/[0.06] shadow-[inset_2px_0_0_var(--amber)]",
                           c.id === selectedId ? "bg-accent/10 shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-surface-2",
                         )}
                       >
-                        <span className="pt-1 font-mono text-xs text-faint">{i + 1}</span>
+                        <span className="flex items-start gap-1 pt-1 font-mono text-xs text-faint">
+                          {i + 1}
+                          {isLowConfidence(c) && (
+                            <span
+                              role="img"
+                              aria-label={`Low OCR confidence (${Math.round(c.confidence! * 100)}%) — review recommended`}
+                              title={`Low OCR confidence (${Math.round(c.confidence! * 100)}%) — review recommended`}
+                            >
+                              <TriangleAlert className="size-3.5 shrink-0 text-amber" aria-hidden />
+                            </span>
+                          )}
+                        </span>
                         <div className="grid gap-1" onClick={(e) => e.stopPropagation()}>
                           <input
                             defaultValue={displayTime(c.start)} key={`s-${c.id}-${c.start}`}

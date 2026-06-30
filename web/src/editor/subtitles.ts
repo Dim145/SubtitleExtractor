@@ -10,6 +10,7 @@ export interface Cue {
   end: number; // seconds
   text: string; // newlines as \n
   an: number; // ASS alignment 1-9
+  confidence?: number; // OCR mean line score 0..1 (undefined when unknown)
 }
 
 export interface ParsedSubs {
@@ -135,6 +136,9 @@ export function parseASS(text: string): ParsedSubs {
       if (parts.length < 10) continue;
       const start = parseAssStamp(parts[1]);
       const end = parseAssStamp(parts[2]);
+      // Name field (parts[4]) optionally carries the OCR mean line score 0..1.
+      const conf = parseFloat(parts[4]);
+      const confidence = Number.isFinite(conf) && conf >= 0 && conf <= 1 ? conf : undefined;
       const rawText = parts.slice(9).join(",");
       const anMatch = rawText.match(/\\an([1-9])/);
       const an = anMatch ? parseInt(anMatch[1], 10) : 2;
@@ -143,7 +147,7 @@ export function parseASS(text: string): ParsedSubs {
         .replace(/\\N/gi, "\n")
         .replace(/\\h/gi, " ")
         .trim();
-      cues.push({ id: nextId(), start, end, text: clean, an });
+      cues.push({ id: nextId(), start, end, text: clean, an, confidence });
     }
   }
   return { cues, width, height };

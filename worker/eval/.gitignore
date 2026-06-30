@@ -1,0 +1,18 @@
+# Cut test clips and any large/adult media must never be committed.
+clips/
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.webm
+*.ts
+
+# Keep tracked: harness.py, README.md, report.md, and reviewed
+# groundtruth/*.txt references (these are explicitly NOT ignored).
+!report.md
+!groundtruth/*.txt
+
+# Auto-generated candidate transcripts are review artifacts, not ground truth.
+# This rule comes AFTER the !groundtruth/*.txt un-ignore so it wins for the
+# .candidate.txt subset (last matching pattern decides).
+groundtruth/*.candidate.txt

@@ -99,4 +99,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for c in cues:
             text = c.text.replace("\n", "\\N")
             tag = f"{{\\an{c.an}}}" if c.an and c.an != 2 else ""
-            fh.write(f"Dialogue: 0,{_ass_time(c.start)},{_ass_time(c.end)},Default,,0,0,0,,{tag}{text}\n")
+            # Stash the OCR confidence (0..1) in the otherwise-unused Name field.
+            # Players ignore it; our editor reads it to flag low-confidence cues.
+            conf = getattr(c, "confidence", None)
+            name = f"{conf:.2f}" if conf is not None else ""
+            fh.write(f"Dialogue: 0,{_ass_time(c.start)},{_ass_time(c.end)},Default,{name},0,0,0,,{tag}{text}\n")
