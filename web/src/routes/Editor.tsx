@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Save, Download, Check, X, ChevronDown, ArrowUpToLine, ArrowDownToLine, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, Download, Check, X, ChevronDown, ArrowUpToLine, ArrowDownToLine, TriangleAlert, ArrowLeftRight, RotateCcw } from "lucide-react";
 import { useJob } from "@/api/jobs";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -63,10 +63,16 @@ export function Editor() {
   const markInRef = useRef<number | null>(null);
   markInRef.current = markIn;
   const [addMenu, setAddMenu] = useState(false);
+  // Timing shift: a global offset applied to every cue (live). shiftTotal tracks
+  // the session's accumulated shift so it can be reset.
+  const [shiftOpen, setShiftOpen] = useState(false);
+  const [shiftInput, setShiftInput] = useState("-1.000");
+  const [shiftTotal, setShiftTotal] = useState(0);
 
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
   const cueListRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLDivElement>(null);
+  const shiftRef = useRef<HTMLDivElement>(null);
 
   // One unified player (native <video>, or WebCodecs frames for MKV/HEVC).
   const player = useSourcePlayer({ url: mediaUrl });
@@ -193,6 +199,22 @@ export function Editor() {
   }
   function delCue(cid: string) { setCues((prev) => prev.filter((c) => c.id !== cid)); setDirty(true); }
 
+  /** Shift every cue's timing by `delta` seconds (live preview; clamped at 0). */
+  function shiftAll(delta: number) {
+    if (!delta || !cues.length) return;
+    setCues((prev) => prev.map((c) => {
+      const start = Math.max(0, c.start + delta);
+      return { ...c, start, end: Math.max(start, c.end + delta) };
+    }));
+    setShiftTotal((t) => t + delta);
+    setDirty(true);
+  }
+  /** Apply the exact amount typed in the shift field (seconds, e.g. -1.25). */
+  function applyShiftInput() {
+    const v = parseFloat(shiftInput.replace(",", "."));
+    if (Number.isFinite(v) && v !== 0) shiftAll(v);
+  }
+
   function serialize(): string {
     return format === "ass" ? toASS(cues, dims.width, dims.height) : format === "vtt" ? toVTT(cues) : toSRT(cues);
   }
@@ -264,6 +286,14 @@ export function Editor() {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [addMenu]);
 
+  // Close the shift popover when clicking outside it.
+  useEffect(() => {
+    if (!shiftOpen) return;
+    const onDoc = (e: MouseEvent) => { if (!shiftRef.current?.contains(e.target as Node)) setShiftOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [shiftOpen]);
+
   const caption = activeCue ? (
     <div className={cn("pointer-events-none absolute inset-0 flex p-6", anClasses(activeCue.an))}>
       <span className="whitespace-pre-wrap rounded bg-black/65 px-3 py-1 text-[clamp(13px,2.4vw,20px)] font-medium text-white shadow">{activeCue.text}</span>
@@ -313,6 +343,46 @@ export function Editor() {
             )}
           </div>
           <Button variant="default" size="sm" disabled={!selectedId} onClick={() => selectedId && delCue(selectedId)}><Trash2 className="size-3.5" /> Delete</Button>
+
+          <div ref={shiftRef} className="relative">
+            <Button
+              variant="default" size="sm" aria-haspopup="dialog" aria-expanded={shiftOpen} disabled={!cues.length}
+              onClick={() => setShiftOpen((o) => !o)} title="Shift the timing of all subtitles"
+            ><ArrowLeftRight className="size-3.5" /> Shift</Button>
+            {shiftOpen && (
+              <div role="dialog" aria-label="Shift all subtitle timing"
+                className="absolute left-0 top-full z-30 mt-1 w-72 rounded-lg border border-border-strong bg-surface p-3 shadow-xl">
+                <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Shift all subtitles</div>
+                <p className="mt-1 text-[11px] text-muted">Move every cue earlier (−) or later (+). Live, on all {cues.length} cues.</p>
+                <div className="mt-2 grid grid-cols-6 gap-1">
+                  {[-1, -0.5, -0.1, 0.1, 0.5, 1].map((d) => (
+                    <button
+                      key={d} type="button" onClick={() => shiftAll(d)}
+                      aria-label={`Shift ${d > 0 ? "later" : "earlier"} by ${Math.abs(d)} seconds`}
+                      className="rounded-md border border-border-strong bg-surface-2 py-1 font-mono text-[11px] transition hover:border-accent"
+                    >{d > 0 ? "+" : ""}{d}s</button>
+                  ))}
+                </div>
+                <div className="mt-2 flex items-center gap-1.5">
+                  <input
+                    value={shiftInput} onChange={(e) => setShiftInput(e.target.value)} inputMode="decimal"
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyShiftInput(); } }}
+                    aria-label="Exact shift in seconds (e.g. -1.25)"
+                    className="h-8 w-24 rounded-lg border border-border-strong bg-surface-2 px-2 font-mono text-[13px] outline-none focus:border-accent"
+                  />
+                  <span className="text-[11px] text-faint">seconds</span>
+                  <Button variant="primary" size="sm" className="ml-auto" onClick={applyShiftInput}>Apply</Button>
+                </div>
+                <div className="mt-2 flex items-center justify-between border-t border-border pt-2 text-[11px]">
+                  <span className="text-muted">Session: <span className="font-mono text-amber">{shiftTotal >= 0 ? "+" : ""}{shiftTotal.toFixed(3)}s</span></span>
+                  <button
+                    type="button" disabled={shiftTotal === 0} onClick={() => shiftAll(-shiftTotal)}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-faint transition hover:text-text disabled:opacity-40 disabled:hover:text-faint"
+                  ><RotateCcw className="size-3" /> Reset</button>
+                </div>
+              </div>
+            )}
+          </div>
           {markIn != null && (
             <span className="flex items-center gap-1.5 rounded-lg border border-amber/40 bg-amber/10 px-2 py-1 text-xs text-amber">
               <span className="size-1.5 rounded-full bg-amber" /> in {displayTime(markIn).slice(3)} · press <kbd className="font-mono">O</kbd>
