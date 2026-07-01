@@ -2,7 +2,8 @@
 // Decode frames with WebCodecs (web-demuxer) → crop subtitle zones → OCR with
 // PP-OCR on onnxruntime-web (WebGPU when available) → dedup → merge into cues.
 // No upload. Best for short clips; WebGPU strongly recommended.
-import { PaddleOcrService, getDefaultWebExecutionProviders } from "ppu-paddle-ocr/web";
+import { PaddleOcrService, DetectionService, getDefaultWebExecutionProviders } from "ppu-paddle-ocr/web";
+import * as ort from "onnxruntime-web";
 import { env as ortEnv } from "onnxruntime-web";
 import type { Zone } from "../api/types";
 
@@ -91,6 +92,151 @@ function maskDensity(mask: Uint8Array): number {
   return n / mask.length;
 }
 
+// --- DBNet detection gate --------------------------------------------------
+// Mirror of the server's DBNet presence gate + auto-zone (worker/subextractor
+// /pipeline.py). Instead of the bright-pixel mask heuristic (which misses faint
+// / short cues), a proper text detector decides "is there >=1 text box here?".
+// We build one dedicated onnxruntime-web session for the det model (the
+// PaddleOcrService keeps its own detection session private, so it can't be
+// reused) and run it standalone via DetectionService.
+//
+// Perf: the det model self-resizes its input to `maxSideLength` (longest side).
+// We cap that low (DET_MAX_SIDE) so per-frame detection on the already-small
+// subtitle crop stays cheap on WASM/WebGPU. The gate runs on every sampled
+// frame (the whole point is to catch cues the mask misses); the change-
+// detection below still decides whether to *re-OCR* an unchanged reading.
+const DET_MAX_SIDE = 640; // longest-side cap for the gate crop (fast)
+const DET_AUTOZONE_MAX_SIDE = 960; // full-frame auto-zone pass wants more detail
+
+interface DetHandle {
+  service: DetectionService;
+  session: ort.InferenceSession;
+}
+
+async function buildDetector(maxSideLength: number): Promise<DetHandle | null> {
+  try {
+    const providers = await getDefaultWebExecutionProviders();
+    const buf = await fetch(MODEL.detection).then((r) => {
+      if (!r.ok) throw new Error(`det model ${r.status}`);
+      return r.arrayBuffer();
+    });
+    const session = await ort.InferenceSession.create(new Uint8Array(buf), {
+      executionProviders: providers,
+      graphOptimizationLevel: "all",
+    });
+    return { service: new DetectionService(session, { maxSideLength }), session };
+  } catch (e) {
+    console.warn("[clientOcr] DBNet detector unavailable, falling back to mask gate:", e);
+    return null;
+  }
+}
+
+// Presence gate: text present iff the detector finds >=1 box (server parity:
+// `detector.detect(crop) >= 1`).
+async function detectHasText(detector: DetectionService, canvas: HTMLCanvasElement): Promise<boolean> {
+  const boxes = await detector.run(canvas);
+  return boxes.length >= 1;
+}
+
+// Auto-zone: run the detector on a sparse set of FULL frames, collect every
+// box's normalized (y-center, height, x-extent), 1D-cluster on y-centers, and
+// emit up to 2 subtitle band(s). Port of pipeline.py:auto_detect_zones. Returns
+// null when nothing solid recurs (caller falls back to the default bottom band).
+type DetBox = { yc: number; bh: number; x1: number; x2: number };
+
+async function autoDetectZones(
+  file: File,
+  duration: number,
+  detector: DetectionService,
+): Promise<Zone[] | null> {
+  // Sparse sampling: ~one frame every 3s, at least a few, capped so this stays
+  // a quick pre-pass.
+  const dur = Math.max(1, duration);
+  const nSamples = Math.floor(Math.min(15, Math.max(4, dur / 3)));
+  const sampleFps = nSamples / dur;
+
+  // Auto-zone needs its own decode pass over full frames. Use a fresh decoder
+  // so the main extraction decode isn't consumed.
+  const scan = new FrameDecoder();
+  await scan.load(file);
+  const boxes: DetBox[] = [];
+  let nFrames = 0;
+  const work = document.createElement("canvas");
+  try {
+    for await (const { bitmap } of scan.sampleFrames(sampleFps)) {
+      nFrames++;
+      const W = bitmap.width, H = bitmap.height;
+      if (W > 0 && H > 0) {
+        work.width = W;
+        work.height = H;
+        work.getContext("2d")!.drawImage(bitmap, 0, 0);
+        for (const b of await detector.run(work)) {
+          const x1 = b.x, y1 = b.y, x2 = b.x + b.width, y2 = b.y + b.height;
+          if (x2 <= x1 || y2 <= y1) continue;
+          boxes.push({ yc: (y1 + y2) / 2 / H, bh: (y2 - y1) / H, x1: x1 / W, x2: x2 / W });
+        }
+      }
+      bitmap.close();
+      if (nFrames >= nSamples + 2) break; // guard against fps rounding overshoot
+    }
+  } finally {
+    scan.destroy();
+  }
+  if (nFrames === 0 || boxes.length === 0) return null;
+
+  // 1D clustering on y-centers: sort, greedily group neighbors within a
+  // tolerance derived from the median box height.
+  boxes.sort((a, b) => a.yc - b.yc);
+  const heights = boxes.map((b) => b.bh).sort((a, b) => a - b);
+  const medH = heights[heights.length >> 1] || 0.02;
+  const tol = Math.max(medH, 0.02);
+
+  const clusters: DetBox[][] = [];
+  let cur: DetBox[] = [];
+  let lastYc: number | null = null;
+  for (const b of boxes) {
+    if (lastYc === null || b.yc - lastYc <= tol) cur.push(b);
+    else { clusters.push(cur); cur = [b]; }
+    lastYc = b.yc;
+  }
+  if (cur.length) clusters.push(cur);
+
+  // Keep clusters recurring across a reasonable fraction of sampled frames.
+  const minSupport = Math.max(2, Math.round(0.2 * nFrames));
+  let kept = clusters.filter((c) => c.length >= minSupport);
+  if (!kept.length) return null;
+
+  // Densest bands first; keep at most 2 (bottom band + optional top caption).
+  kept.sort((a, b) => b.length - a.length);
+  kept = kept.slice(0, 2);
+
+  const zones: Zone[] = [];
+  for (const c of kept) {
+    const ycs = c.map((b) => b.yc);
+    const bhs = c.map((b) => b.bh);
+    const x1s = c.map((b) => b.x1);
+    const x2s = c.map((b) => b.x2);
+    const bandH = Math.max(...bhs);
+    const yTop = Math.min(...ycs) - bandH / 2;
+    const yBot = Math.max(...ycs) + bandH / 2;
+    // Vertical padding so cropping doesn't clip ascenders/descenders or a
+    // second wrapped line of the same subtitle.
+    const padV = Math.max(bandH, 0.04);
+    const y = Math.max(0, yTop - padV);
+    const h = Math.min(1 - y, yBot - yTop + 2 * padV);
+    // Horizontal extent with a small margin.
+    const x = Math.max(0, Math.min(...x1s) - 0.02);
+    const w = Math.min(1 - x, Math.max(...x2s) - Math.min(...x1s) + 0.04);
+    if (h <= 0 || w <= 0) continue;
+    zones.push({
+      x: +x.toFixed(4), y: +y.toFixed(4), w: +w.toFixed(4), h: +h.toFixed(4),
+    });
+  }
+  // Order top→bottom for stable zone indices.
+  zones.sort((a, b) => a.y - b.y);
+  return zones.length ? zones : null;
+}
+
 // Drop obvious OCR noise (single stray glyphs like "R", punctuation-only reads)
 // so a bad transient frame can't seed a cue.
 function isJunk(s: string): boolean {
@@ -177,6 +323,10 @@ export async function extractInBrowser(
   });
   await ocr.initialize();
 
+  // DBNet presence gate (server parity). Built as a standalone det session on
+  // the same model; null → fall back to the bright-pixel mask gate.
+  const detector = await buildDetector(DET_MAX_SIDE);
+
   onProgress(6, "decoding");
   const dec = new FrameDecoder();
   const { duration } = await dec.load(file);
@@ -185,6 +335,35 @@ export async function extractInBrowser(
   const total = Math.max(1, Math.floor((duration || 0) * fps));
 
   const defaultZone: Zone[] = [{ x: 0, y: 0.62, w: 1, h: 0.38 }];
+
+  // Auto-zone: when enabled and no explicit zones were given, discover the
+  // subtitle band(s) via DBNet on a sparse full-frame scan; on success use them,
+  // else fall back to the default bottom band. Needs its own detector instance
+  // sized for full frames (more detail than the per-frame crop gate).
+  let zones: Zone[] | undefined = opts.zones && opts.zones.length ? opts.zones : undefined;
+  if (opts.autoZone && !zones) {
+    onProgress(4, "auto-zone");
+    const azDetector = detector
+      ? await buildDetector(DET_AUTOZONE_MAX_SIDE)
+      : null;
+    if (azDetector) {
+      try {
+        const detected = await autoDetectZones(file, duration || 0, azDetector.service);
+        if (detected) {
+          zones = detected;
+          const bands = detected.map((z) => `y=${z.y.toFixed(2)}-${(z.y + z.h).toFixed(2)}`).join(", ");
+          console.info(`[clientOcr] auto-zone: ${detected.length} band(s) at ${bands}`);
+        } else {
+          console.info("[clientOcr] auto-zone: fell back to default band");
+        }
+      } catch (e) {
+        console.warn("[clientOcr] auto-zone failed, using default band:", e);
+      } finally {
+        try { await azDetector.session.release(); } catch { /* ignore */ }
+      }
+    }
+  }
+
   let rects: Rect[] = [];
   let samples: Sample[][] = [];
   let W = 0, H = 0;
@@ -197,7 +376,7 @@ export async function extractInBrowser(
     if (W === 0) {
       W = bitmap.width;
       H = bitmap.height;
-      rects = (opts.zones && opts.zones.length ? opts.zones : defaultZone).map((z) => pxRect(z, W, H));
+      rects = (zones && zones.length ? zones : defaultZone).map((z) => pxRect(z, W, H));
       samples = rects.map(() => []);
     }
     for (let zi = 0; zi < rects.length; zi++) {
@@ -208,8 +387,13 @@ export async function extractInBrowser(
       ctx.drawImage(bitmap, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
       // OCR every text-bearing frame so the consensus vote in mergeCues can
       // outvote single-frame misreads; skip frames with no text-like content.
+      // Presence gate: the DBNet detector (recall win — catches faint/short
+      // cues the mask misses) when available, else the bright-pixel mask.
       let text = "";
-      if (maskDensity(textMask(work)) > 0.012) {
+      const present = detector
+        ? await detectHasText(detector.service, work)
+        : maskDensity(textMask(work)) > 0.012;
+      if (present) {
         const res = await ocr.recognize(work, { flatten: true });
         const raw = (res?.text ?? "").trim();
         text = isJunk(raw) ? "" : raw;
@@ -221,11 +405,19 @@ export async function extractInBrowser(
   }
 
   onProgress(94, "merging");
-  const cues: Cue[] = [];
+  let cues: Cue[] = [];
   for (const zoneSamples of samples) cues.push(...mergeCues(zoneSamples, frameInterval));
   cues.sort((a, b) => a.start - b.start);
 
+  // Drop permanent overlays (watermark / logo / station ID): a real subtitle
+  // never spans most of the video. Server parity (pipeline.py): duration > 12s
+  // AND > 0.5 * video-duration. Guards auto-zone + wide manual zones.
+  if (duration > 0) {
+    cues = cues.filter((c) => !((c.end - c.start) > 12 && (c.end - c.start) > 0.5 * duration));
+  }
+
   dec.destroy();
+  try { await detector?.session.release(); } catch { /* ignore */ }
   onProgress(100, "done");
   return { cues, width: W || 1280, height: H || 720 };
 }
