@@ -68,6 +68,38 @@ DEFAULT_CHAR_VOTING = True
 # the video to be treated as a station-ID/watermark overlay rather than a cue.
 DEFAULT_PERMANENT_MIN_SECONDS = 12.0
 DEFAULT_PERMANENT_MIN_FRACTION = 0.8
+# A real burned-in subtitle / song lyric spans much of the frame width; a
+# watermark/logo is narrow and corner-placed. So a long cue is only treated as a
+# permanent overlay when its horizontal extent (w_frac, normalized to zone width)
+# is BELOW this threshold. A long cue that spans most of the width is kept.
+PERMANENT_MIN_WIDTH_FRAC = 0.5
+
+
+def is_permanent_overlay(
+    cue: "Cue",
+    duration: float,
+    perm_secs: float = DEFAULT_PERMANENT_MIN_SECONDS,
+    perm_frac: float = DEFAULT_PERMANENT_MIN_FRACTION,
+    width_frac: float = PERMANENT_MIN_WIDTH_FRAC,
+) -> bool:
+    """True if a cue looks like a permanent watermark/logo/station-ID overlay
+    rather than a real subtitle, and should be dropped.
+
+    A cue is flagged only when it is BOTH long in absolute terms (> ``perm_secs``)
+    AND covers most of the clip's runtime (> ``perm_frac`` * ``duration``) AND is
+    NARROW — its horizontal extent ``w_frac`` (normalized to the zone width) is
+    below ``width_frac``. A long cue that spans a near-full-frame width is a real
+    subtitle / song lyric and is KEPT.
+
+    Graceful degradation: when box geometry is unavailable (the ``w_frac == 0.0``
+    sentinel, e.g. a VLM backend returning no boxes), fall back to the duration-only
+    behavior for that cue — flag it if and only if it is long, as before."""
+    dur = cue.end - cue.start
+    if not (dur > perm_secs and dur > perm_frac * duration):
+        return False  # not long enough → keep
+    if cue.w_frac <= 0.0:
+        return True  # no geometry → duration-only fallback (long ⇒ permanent)
+    return cue.w_frac < width_frac  # long: drop only when narrow
 
 # Map a job language to a RapidOCR recognition model family. Latin covers
 # fr/en/es/de/it/pt… (the project's primary target). Unknown → latin.
@@ -414,8 +446,13 @@ def extract_cues(
             limit_side_len=int(cfg.get("detector_limit_side_len", 736)),
         )
 
-    def _ocr(crop: np.ndarray, mask: np.ndarray) -> list:
-        """OCR a crop, scaling it toward the target glyph height (capped)."""
+    def _ocr(crop: np.ndarray, mask: np.ndarray) -> tuple[list, int]:
+        """OCR a crop, scaling it toward the target glyph height (capped).
+
+        Returns (lines, ocr_width) where ocr_width is the pixel width of the image
+        actually fed to the recognizer. Line bboxes are in that image's coords, so
+        dividing an x by ocr_width yields a fraction of the ZONE width (scale
+        cancels out), which is what the horizontal-extent plumbing needs."""
         scale = min(max_scale, upscale)  # fallback when height can't be estimated
         if target_h > 0:
             th = estimate_text_height(mask)
@@ -424,7 +461,7 @@ def extract_cues(
         img = crop
         if scale > 1.01:
             img = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        return backend.recognize(img)
+        return backend.recognize(img), int(img.shape[1])
 
     info = probe(video_path)
     # Auto-zone: when enabled and no explicit zones were given, discover the
@@ -452,11 +489,15 @@ def extract_cues(
     if log:
         log(f"video {info.width}x{info.height} @ {info.fps:.2f}fps, ~{info.duration:.0f}s, {len(zones)} zone(s)")
 
-    samples: list[list[tuple[float, str, int, float]]] = [[] for _ in zones]
+    # Per-zone frame samples: (timestamp, text, alignment, confidence, extent),
+    # where extent is (x_frac, w_frac) normalized to the zone width or None when
+    # no box geometry is available for that frame.
+    samples: list[list[tuple]] = [[] for _ in zones]
     zone_an = [alignment_from_bbox((0, 0, zw, zh), info.width, info.height, zx, zy)
                for (zx, zy, zw, zh) in zones]
     prev_mask: list[Any] = [None for _ in zones]
     prev_lines: list[list] = [[] for _ in zones]
+    prev_ocr_w: list[int] = [0 for _ in zones]  # width of last OCR'd image, for x-extent norm
     prev_pres: list[float] = [0.0 for _ in zones]  # last text-presence, for delta trigger
     grp_best: list[float] = [0.0 for _ in zones]   # best sharpness in current group
     grp_ocr: list[int] = [0 for _ in zones]         # OCR calls spent on current group
@@ -483,7 +524,8 @@ def extract_cues(
                 lines = []
                 grp_best[zi], grp_ocr[zi] = 0.0, 0
                 prev_mask[zi], prev_lines[zi], prev_pres[zi] = None, lines, 0.0
-                samples[zi].append((sf.timestamp, "", zone_an[zi], 0.0))
+                prev_ocr_w[zi] = 0
+                samples[zi].append((sf.timestamp, "", zone_an[zi], 0.0, None))
                 continue
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
             mask = text_mask(gray)
@@ -501,6 +543,7 @@ def extract_cues(
 
             if not present:
                 lines = []  # no text-like content → skip OCR (avoids hallucinations)
+                ocr_w = 0
                 grp_best[zi], grp_ocr[zi] = 0.0, 0
             else:
                 # A short word appearing over a bright/busy background barely moves
@@ -513,25 +556,40 @@ def extract_cues(
                     or (ppres > 0 and abs(pres - ppres) / ppres >= pres_change_thr)
                 )
                 if changed:
-                    lines = _ocr(crop, mask)
+                    lines, ocr_w = _ocr(crop, mask)
                     grp_best[zi], grp_ocr[zi] = focus_measure(gray), 1
                 else:
                     sharp = focus_measure(gray)
                     if best_frame and grp_ocr[zi] < max_ocr_grp and sharp > grp_best[zi] * (1.0 + best_margin):
                         # A crisper frame of the same subtitle → re-OCR it; the new
                         # reading joins the consensus vote for this cue.
-                        lines = _ocr(crop, mask)
+                        lines, ocr_w = _ocr(crop, mask)
                         grp_best[zi], grp_ocr[zi] = max(grp_best[zi], sharp), grp_ocr[zi] + 1
                     else:
                         lines = prev_lines[zi]  # text unchanged → reuse last reading
+                        ocr_w = prev_ocr_w[zi]
             prev_mask[zi], prev_lines[zi], prev_pres[zi] = mask, lines, pres
+            prev_ocr_w[zi] = ocr_w
 
             good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
             text = _order_text(good)
             # Empty reads carry no confidence signal — use 0.0 so they don't
             # inflate a cue's mean confidence in the vote.
             conf = (sum(l.confidence for l in good) / len(good)) if good else 0.0
-            samples[zi].append((sf.timestamp, text, zone_an[zi], conf))
+            # Horizontal extent (x_frac, w_frac) of this frame's text, normalized to
+            # the ZONE width. bbox x-coords are in the OCR'd image's frame and ocr_w
+            # is that image's width, so scale cancels. None when there's no geometry
+            # (no good lines or the backend reported a zero-width bbox), which the
+            # merger treats as "no geometry" and the permanent filter falls back on.
+            extent = None
+            if good and ocr_w > 0:
+                xs0 = [l.bbox[0] for l in good]
+                xs1 = [l.bbox[2] for l in good]
+                x_min = max(0.0, min(xs0) / ocr_w)
+                x_max = min(1.0, max(xs1) / ocr_w)
+                if x_max > x_min:
+                    extent = (x_min, x_max - x_min)
+            samples[zi].append((sf.timestamp, text, zone_an[zi], conf, extent))
 
         now = time.monotonic()
         if on_progress and (i % _PROGRESS_EVERY == 0 or now - last_poll >= _PROGRESS_SECS):
@@ -560,15 +618,20 @@ def extract_cues(
     # spans most of the video. Catches e.g. a "HentaiVOST.FR" watermark that
     # auto-zone clustering or a wide manual zone picks up as one long cue.
     if cfg.get("drop_permanent", True) and info.duration > 0:
-        # A real subtitle can legitimately run long on a short clip, so requiring
-        # >0.5*duration alone false-dropped long real cues. Require the cue to be
-        # BOTH long in absolute terms AND cover most of the clip (0.8) before
-        # treating it as a permanent overlay.
+        # A real subtitle can legitimately run long on a short clip, so a long
+        # duration alone false-dropped genuine long cues. Drop a cue as a permanent
+        # overlay only when it is BOTH long in absolute terms AND covers most of the
+        # clip's runtime AND is NARROW (does not span a near-full-frame width). A
+        # long cue that spans most of the width is a real subtitle / song lyric and
+        # is KEPT. When box geometry is unavailable (w_frac == 0.0 sentinel, e.g. a
+        # VLM backend that returns no boxes) we fall back to the duration-only test
+        # so we neither crash nor over-drop.
         perm_secs = float(cfg.get("permanent_min_seconds", DEFAULT_PERMANENT_MIN_SECONDS))
         perm_frac = float(cfg.get("permanent_min_fraction", DEFAULT_PERMANENT_MIN_FRACTION))
+        width_frac = float(cfg.get("permanent_min_width_fraction", PERMANENT_MIN_WIDTH_FRAC))
         cues = [
             c for c in cues
-            if not ((c.end - c.start) > perm_secs and (c.end - c.start) > perm_frac * info.duration)
+            if not is_permanent_overlay(c, info.duration, perm_secs, perm_frac, width_frac)
         ]
     # French-only deterministic normalizer: restore elision apostrophes and
     # split run-together words the OCR recognizer glued (wordlist-validated, so

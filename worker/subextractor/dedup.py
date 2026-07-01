@@ -76,6 +76,13 @@ class Cue:
     an: int  # ASS alignment 1-9
     frames: int = 1
     confidence: float = 1.0  # mean OCR line score 0..1 across the cue's frames
+    # Horizontal extent of the cue's text, normalized 0..1 relative to the ZONE
+    # width it was OCR'd in (min x .. max x across the cue's samples). Used to tell
+    # a real full-width subtitle from a narrow corner watermark/logo. Left at the
+    # default sentinel (w_frac == 0.0) when the backend supplies no box geometry,
+    # so downstream filters can fall back to duration-only behavior.
+    x_frac: float = 0.0
+    w_frac: float = 0.0
 
 
 def focus_measure(gray: np.ndarray) -> float:
@@ -308,6 +315,9 @@ class _Group:
     an: int
     texts: list[str] = field(default_factory=list)
     confs: list[float] = field(default_factory=list)
+    # Per-frame horizontal extents (x_frac, w_frac) normalized to zone width, for
+    # frames where the backend supplied box geometry. Empty when none did.
+    extents: list[tuple[float, float]] = field(default_factory=list)
 
 
 def merge_into_cues(
@@ -322,13 +332,28 @@ def merge_into_cues(
 ) -> list[Cue]:
     """Collapse per-frame (timestamp, text, alignment, confidence) samples into
     timed cues, then apply persistence/duration/junk filters and consensus-vote
-    the text. Samples may also be 3-tuples (no confidence) for compatibility."""
+    the text. Samples may also be 3-tuples (no confidence) for compatibility.
+
+    An optional 5th element ``(x_frac, w_frac)`` — the frame's text horizontal
+    extent normalized to the zone width — is aggregated across the group into the
+    cue's ``x_frac``/``w_frac``. It is threaded through untouched by the text /
+    timing / confidence logic and may be ``None`` (or absent) when the backend
+    reported no box geometry for that frame; such frames simply don't contribute."""
     groups: list[_Group] = []
     cur: _Group | None = None
+
+    def _extent(sample: tuple) -> tuple[float, float] | None:
+        if len(sample) <= 4:
+            return None
+        ext = sample[4]
+        if ext is None:
+            return None
+        return (float(ext[0]), float(ext[1]))
 
     for sample in samples:
         ts, text, an = sample[0], sample[1], sample[2]
         conf = float(sample[3]) if len(sample) > 3 else 1.0
+        ext = _extent(sample)
         t = text.strip()
         if not t:
             if cur is not None:
@@ -340,10 +365,13 @@ def merge_into_cues(
             cur.end = ts
             cur.texts.append(t)
             cur.confs.append(conf)
+            if ext is not None:
+                cur.extents.append(ext)
         else:
             if cur is not None:
                 groups.append(cur)
-            cur = _Group(start=ts, end=ts, an=an, texts=[t], confs=[conf])
+            cur = _Group(start=ts, end=ts, an=an, texts=[t], confs=[conf],
+                         extents=[ext] if ext is not None else [])
     if cur is not None:
         groups.append(cur)
 
@@ -364,7 +392,19 @@ def merge_into_cues(
         if drop_junk and is_junk(text):
             continue
         conf = (sum(g.confs) / len(g.confs)) if g.confs else 1.0
-        cues.append(Cue(start=g.start, end=end, text=text, an=g.an, frames=frames, confidence=conf))
+        # Aggregate the horizontal span across the group's frames: leftmost x and
+        # rightmost edge (x + w), clamped to [0, 1]. w_frac stays 0.0 (sentinel:
+        # "no geometry") when no frame supplied a box, so the permanent-overlay
+        # filter degrades to duration-only for this cue.
+        if g.extents:
+            x_min = min(x for x, _ in g.extents)
+            x_max = max(x + w for x, w in g.extents)
+            x_frac = max(0.0, min(1.0, x_min))
+            w_frac = max(0.0, min(1.0, x_max - x_min))
+        else:
+            x_frac = w_frac = 0.0
+        cues.append(Cue(start=g.start, end=end, text=text, an=g.an, frames=frames,
+                        confidence=conf, x_frac=x_frac, w_frac=w_frac))
 
     # Bridge tiny gaps between consecutive near-identical cues.
     merged: list[Cue] = []
@@ -380,6 +420,18 @@ def merge_into_cues(
             prev.confidence = (prev.confidence * prev.frames + c.confidence * c.frames) / max(1, total)
             prev.end = c.end
             prev.frames = total
+            # Union the horizontal extents, considering only cues that actually
+            # carry geometry (w_frac > 0). A geometry-less cue must not shrink a
+            # real span nor fabricate one for a no-geometry pair.
+            spans = [
+                (cc.x_frac, cc.x_frac + cc.w_frac)
+                for cc in (prev, c) if cc.w_frac > 0.0
+            ]
+            if spans:
+                lo = min(s[0] for s in spans)
+                hi = max(s[1] for s in spans)
+                prev.x_frac = max(0.0, min(1.0, lo))
+                prev.w_frac = max(0.0, min(1.0, hi - lo))
         else:
             merged.append(c)
     return merged
