@@ -76,6 +76,9 @@ export function Editor() {
   const [announce, setAnnounce] = useState("");
   const [zoomPx, setZoomPx] = useState(60); // waveform zoom (px/sec) for aria-valuetext
   const [helpOpen, setHelpOpen] = useState(false); // keyboard-shortcuts legend
+  // Small-screen (< lg) pane switch. Both panes stay mounted (toggled via CSS,
+  // not conditional render) so switching never resets the player or waveform.
+  const [mobileTab, setMobileTab] = useState<"video" | "cues">("video");
   // Keys ("s-<id>" / "e-<id>") of timecode fields whose last blur failed to
   // parse — drives an inline red border so the drop isn't silent (item 21).
   const [invalidTimes, setInvalidTimes] = useState<Set<string>>(new Set());
@@ -164,6 +167,20 @@ export function Editor() {
     onSelect: (cid) => { setSelectedId(cid); const c = cues.find((x) => x.id === cid); if (c) player.seek(c.start); },
     onCreate: (start, end) => addCueRange(start, end),
   });
+  // Latest `wave` in a ref so the once-bound keydown handler can scroll the
+  // waveform to a keyboard-selected cue without rebinding every render.
+  const waveRef = useRef(wave);
+  waveRef.current = wave;
+
+  /** Select a cue by id: seek the playhead there AND scroll its waveform region
+   * into view (the region's selected color is applied by useWaveform's sync). */
+  const selectCue = useCallback((cid: string) => {
+    const c = sortedRef.current.find((x) => x.id === cid);
+    if (!c) return;
+    setSelectedId(cid);
+    player.seek(c.start);
+    waveRef.current.scrollToTime(c.start);
+  }, [player.seek]);
 
   // active cue (under the playhead) — drives the caption overlay + auto-scroll.
   const activeId = useMemo(() => sortedCues.find((c) => currentTime >= c.start && currentTime < c.end)?.id ?? null, [sortedCues, currentTime]);
@@ -172,6 +189,21 @@ export function Editor() {
     el?.scrollIntoView({ block: "nearest" });
   }, [activeId]);
   const activeCue = sortedCues.find((c) => c.id === activeId);
+  const selectedCue = useMemo(() => cues.find((c) => c.id === selectedId) ?? null, [cues, selectedId]);
+  // The waveform is a graphical control; screen readers get the selection state
+  // through its accessible name (updated here) + the polite announcement below.
+  const waveLabel = selectedCue
+    ? `Subtitle timeline. Selected cue ${displayTime(selectedCue.start)} to ${displayTime(selectedCue.end)}${selectedCue.text ? `: ${selectedCue.text}` : ""}`
+    : "Subtitle timeline. No cue selected";
+  // Announce the selection (id-keyed so it only fires when the cue actually
+  // changes, not on every edge nudge which keeps the same id).
+  const lastAnnouncedSel = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedCue) { lastAnnouncedSel.current = null; return; }
+    if (lastAnnouncedSel.current === selectedCue.id) return;
+    lastAnnouncedSel.current = selectedCue.id;
+    setAnnounce(`Selected cue ${displayTime(selectedCue.start)} to ${displayTime(selectedCue.end)}${selectedCue.text ? `: ${selectedCue.text}` : ""}`);
+  }, [selectedCue]);
 
   // Cues OCR flagged as low-confidence — surfaced as a "N to review" chip.
   const lowConfCount = useMemo(() => cues.filter(isLowConfidence).length, [cues]);
@@ -179,7 +211,7 @@ export function Editor() {
   function reviewFirstLowConf() {
     const c = [...cues].sort((a, b) => a.start - b.start).find(isLowConfidence);
     if (!c) return;
-    setSelectedId(c.id); player.seek(c.start);
+    selectCue(c.id);
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     cueListRef.current?.querySelector(`[data-cue="${c.id}"]`)?.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
   }
@@ -285,7 +317,8 @@ export function Editor() {
   }
 
   // Editing keys ([ / ] set in/out at the playhead · ↑/↓ move selection ·
-  // , / . nudge the selected cue's in/out, Shift for a coarser step).
+  // , / . nudge the selected cue's in/out (Shift = coarser step) · Alt+, / Alt+.
+  // slide the whole selected cue earlier/later).
   // Transport keys (Space, ← →, Home) live in usePlayerHotkeys, shared site-wide.
   // Reads cues/selection via refs so it binds ONCE (not on every keystroke).
   const nudgeSelected = useCallback((edge: "start" | "end", delta: number) => {
@@ -295,6 +328,17 @@ export function Editor() {
       if (c.id !== sel) return c;
       if (edge === "start") return { ...c, start: Math.max(0, Math.min(c.start + delta, c.end - 0.05)) };
       return { ...c, end: Math.max(c.end + delta, c.start + 0.05) };
+    }));
+    setDirty(true);
+  }, []);
+  /** Shift the whole selected cue (start+end together) by `delta`, clamped at 0. */
+  const moveSelected = useCallback((delta: number) => {
+    const sel = selectedRef.current;
+    if (!sel) return;
+    setCues((prev) => prev.map((c) => {
+      if (c.id !== sel) return c;
+      const start = Math.max(0, c.start + delta);
+      return { ...c, start, end: start + (c.end - c.start) };
     }));
     setDirty(true);
   }, []);
@@ -308,6 +352,8 @@ export function Editor() {
       if (e.key === "]" && sel) { e.preventDefault(); patch(sel, { end: timeRef.current }); return; }
       if ((e.key === "," || e.key === ".") && sel) {
         e.preventDefault();
+        // Alt = slide the whole cue; otherwise nudge one edge (Shift = coarser).
+        if (e.altKey) { moveSelected(e.key === "," ? -0.05 : 0.05); return; }
         const step = e.shiftKey ? 0.5 : 0.05;
         nudgeSelected(e.key === "," ? "start" : "end", e.key === "," ? -step : step);
         return;
@@ -327,13 +373,13 @@ export function Editor() {
         const idx = list.findIndex((c) => c.id === sel);
         const ni = Math.max(0, Math.min(list.length - 1, (idx < 0 ? 0 : idx) + (e.key === "ArrowDown" ? 1 : -1)));
         const c = list[ni];
-        if (c) { setSelectedId(c.id); player.seek(c.start); }
+        if (c) selectCue(c.id);
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-    // player.seek is stable (useCallback in useSourcePlayer); binds once.
-  }, [player.seek, nudgeSelected]);
+    // selectCue/nudgeSelected/moveSelected are stable (useCallback); binds once.
+  }, [selectCue, nudgeSelected, moveSelected]);
 
   // Close the add-menu when clicking outside it.
   useEffect(() => {
@@ -469,9 +515,45 @@ export function Editor() {
           </div>
         </div>
 
+        {/* Small-screen pane switch. Hidden at lg+, where both panes show side
+            by side. Arrow-key navigable per the tablist pattern. */}
+        <div
+          role="tablist" aria-label="Editor panes"
+          className="flex gap-1 border-b border-border bg-surface-2 p-1.5 lg:hidden"
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            e.preventDefault();
+            const next = mobileTab === "video" ? "cues" : "video";
+            setMobileTab(next);
+            // Roving focus: move to the newly-selected tab (it becomes tabbable).
+            document.getElementById(`editor-tab-${next}`)?.focus();
+          }}
+        >
+          {(["video", "cues"] as const).map((tab) => {
+            const selected = mobileTab === tab;
+            return (
+              <button
+                key={tab} type="button" role="tab" id={`editor-tab-${tab}`}
+                aria-selected={selected} aria-controls={`editor-panel-${tab}`}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => setMobileTab(tab)}
+                className={cn(
+                  "h-9 flex-1 rounded-lg border text-[13px] font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+                  selected ? "border-accent bg-accent/10 text-accent" : "border-border-strong bg-surface text-muted hover:text-text",
+                )}
+              >
+                {tab === "video" ? "Video" : `Cues${cues.length ? ` (${cues.length})` : ""}`}
+              </button>
+            );
+          })}
+        </div>
+
         <div className="grid lg:grid-cols-[1.55fr_1fr]">
           {/* stage: player + waveform */}
-          <div className="border-border lg:border-r">
+          <div
+            role="tabpanel" id="editor-panel-video" aria-labelledby="editor-tab-video"
+            className={cn("border-border lg:block lg:border-r", mobileTab === "video" ? "block" : "hidden lg:block")}
+          >
             {videoUnavailable ? (
               <div className="relative aspect-video bg-black">
                 <div className="absolute inset-0 grid place-items-center bg-surface-2 px-6 text-center">
@@ -488,7 +570,8 @@ export function Editor() {
               {player.mode === "video" ? (
                 <>
                   <div
-                    ref={setWaveEl} tabIndex={0} role="group" aria-label="Subtitle timeline"
+                    ref={setWaveEl} tabIndex={0} role="group" aria-label={waveLabel}
+                    aria-keyshortcuts="ArrowUp ArrowDown Comma Period Shift+Comma Shift+Period Alt+Comma Alt+Period BracketLeft BracketRight N I O"
                     className="rounded-lg border border-border bg-surface-2 p-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   />
                   <div className="mt-2 flex items-center gap-2 text-xs text-faint">
@@ -508,8 +591,14 @@ export function Editor() {
           </div>
 
           {/* cue table. Below lg it takes natural height (no fixed max-h that
-              would trap it in a tiny scroller on small screens). */}
-          <div className="flex flex-col lg:max-h-[560px]" role="grid" aria-label="Subtitle cues" aria-rowcount={sortedCues.length}>
+              would trap it in a tiny scroller on small screens). Wrapped in a
+              tabpanel so the mobile switch can show/hide it via CSS (kept mounted
+              so cue edits and scroll position survive tab switches). */}
+          <div
+            role="tabpanel" id="editor-panel-cues" aria-labelledby="editor-tab-cues"
+            className={cn("min-h-0 flex-col lg:flex", mobileTab === "cues" ? "flex" : "hidden lg:flex")}
+          >
+          <div className="flex flex-col lg:max-h-[560px]" role="grid" aria-label="Subtitle cues" aria-rowcount={sortedCues.length} aria-keyshortcuts="ArrowUp ArrowDown Comma Period Alt+Comma Alt+Period N I O">
             <div role="row" className="grid grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint sm:grid-cols-[28px_88px_1fr_32px]">
               <span role="columnheader">#</span><span role="columnheader">Time</span><span role="columnheader">Text</span><span role="columnheader" aria-label="Actions" />
             </div>
@@ -536,7 +625,7 @@ export function Editor() {
                       <div
                         data-cue={c.id} role="row" aria-rowindex={i + 1}
                         aria-selected={c.id === selectedId}
-                        onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
+                        onClick={() => selectCue(c.id)}
                         className={cn(
                           "grid cursor-pointer grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-sm sm:grid-cols-[28px_88px_1fr_32px]",
                           c.id === activeId && "bg-amber/10",
@@ -619,6 +708,7 @@ export function Editor() {
               )}
             </div>
           </div>
+          </div>
         </div>
       </div>
       <div className="relative mt-2 flex items-center gap-2 text-xs text-muted">
@@ -647,10 +737,11 @@ export function Editor() {
                 <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-faint">Editing</div>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
                   <dt><kbd className="font-mono text-accent">N</kbd></dt><dd>Add cue at playhead</dd>
-                  <dt><kbd className="font-mono text-accent">I</kbd> / <kbd className="font-mono text-accent">O</kbd></dt><dd>Mark in / out</dd>
-                  <dt><kbd className="font-mono text-accent">[</kbd> / <kbd className="font-mono text-accent">]</kbd></dt><dd>Set in / out</dd>
+                  <dt><kbd className="font-mono text-accent">I</kbd> / <kbd className="font-mono text-accent">O</kbd></dt><dd>Mark in / out (then create cue)</dd>
+                  <dt><kbd className="font-mono text-accent">[</kbd> / <kbd className="font-mono text-accent">]</kbd></dt><dd>Set in / out at playhead</dd>
                   <dt><kbd className="font-mono text-accent">,</kbd> / <kbd className="font-mono text-accent">.</kbd></dt><dd>Nudge in / out (Shift = coarser)</dd>
-                  <dt><kbd className="font-mono text-accent">↑ ↓</kbd></dt><dd>Select prev / next cue</dd>
+                  <dt><kbd className="font-mono text-accent">Alt</kbd>+<kbd className="font-mono text-accent">,</kbd> / <kbd className="font-mono text-accent">.</kbd></dt><dd>Slide whole cue earlier / later</dd>
+                  <dt><kbd className="font-mono text-accent">↑ ↓</kbd></dt><dd>Select prev / next cue (scrolls waveform)</dd>
                 </dl>
               </div>
             </div>

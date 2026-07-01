@@ -117,5 +117,12 @@ export function useWaveform({ media, container, cues, selectedId, onUpdate, onSe
       if (ws && dur) ws.seekTo(Math.min(0.999, sec / dur));
     },
     zoom: (pxPerSec: number) => wsRef.current?.zoom(pxPerSec),
+    /** Scroll the waveform so `sec` is visible — used when the keyboard/table
+     * moves the selection to a cue that's off-screen at the current zoom. */
+    scrollToTime: (sec: number) => {
+      const ws = wsRef.current;
+      const dur = ws?.getDuration() || 0;
+      if (ws && dur) ws.setScrollTime(sec);
+    },
   };
 }
