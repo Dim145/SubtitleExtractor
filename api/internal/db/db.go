@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -15,9 +16,26 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Connect opens and verifies a pgx connection pool.
+// Connect opens and verifies a pgx connection pool with sane sizing/lifetime
+// limits (overridable via the standard pool_* query params in DATABASE_URL).
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.MaxConns == 0 {
+		cfg.MaxConns = 10
+	}
+	if cfg.MaxConnLifetime == 0 {
+		cfg.MaxConnLifetime = time.Hour
+	}
+	if cfg.MaxConnIdleTime == 0 {
+		cfg.MaxConnIdleTime = 5 * time.Minute
+	}
+	if cfg.HealthCheckPeriod == 0 {
+		cfg.HealthCheckPeriod = time.Minute
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"subtitleextractor/internal/auth"
 	"subtitleextractor/internal/events"
 )
 
@@ -17,6 +18,10 @@ func terminalStatus(s string) bool {
 // handleJobEvents streams a job's progress, logs and final status over SSE.
 // On connect it sends a snapshot (current status + existing logs), then live
 // events from the hub until the job finishes or the client disconnects.
+// maxSSEStreamDuration bounds how long a single SSE subscriber may stay open,
+// so abandoned/half-open connections don't accumulate indefinitely.
+const maxSSEStreamDuration = 30 * time.Minute
+
 func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 	job, ok := s.ownedJob(w, r)
 	if !ok {
@@ -28,6 +33,16 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap concurrent streams per user before writing any SSE headers.
+	u := auth.UserFromContext(r.Context())
+	if u != nil {
+		if !s.acquireSSE(u.ID) {
+			writeError(w, http.StatusTooManyRequests, "too many open event streams")
+			return
+		}
+		defer s.releaseSSE(u.ID)
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -36,6 +51,14 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 	// Subscribe before the snapshot so no event is missed in the gap.
 	sub := s.hub.Subscribe(job.ID)
 	defer s.hub.Unsubscribe(job.ID, sub)
+
+	// Re-fetch the job after subscribing: it may have reached a terminal state (or
+	// been re-run back to queued) between ownedJob's read and Subscribe. Evaluate
+	// terminality on this fresh snapshot to avoid both a missed close and a
+	// premature one on a re-run.
+	if fresh, err := s.jobs.Get(r.Context(), job.ID); err == nil {
+		job = fresh
+	}
 
 	writeSSE(w, "status", map[string]any{
 		"status": job.Status, "progressPct": job.ProgressPct, "stage": job.ProgressStage,
@@ -55,24 +78,57 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 
 	keepalive := time.NewTicker(20 * time.Second)
 	defer keepalive.Stop()
+	deadline := time.NewTimer(maxSSEStreamDuration)
+	defer deadline.Stop()
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-deadline.C:
+			// Bound the subscriber lifetime; the client can reconnect.
+			return
 		case ev := <-sub:
 			writeSSE(w, ev.Type, ev.Data)
 			flusher.Flush()
+			// Only close when a status event reports a terminal status — a re-run
+			// republishes a non-terminal "queued" status that must NOT close us.
 			if ev.Type == "status" {
-				// status is only published on completion → close the stream.
-				writeSSE(w, "done", nil)
-				flusher.Flush()
-				return
+				if data, ok := ev.Data.(map[string]any); ok {
+					if st, _ := data["status"].(string); terminalStatus(st) {
+						writeSSE(w, "done", nil)
+						flusher.Flush()
+						return
+					}
+				}
 			}
 		case <-keepalive.C:
 			_, _ = io.WriteString(w, ": keepalive\n\n")
 			flusher.Flush()
 		}
+	}
+}
+
+// acquireSSE reserves an SSE slot for a user, returning false when the per-user
+// cap is already reached.
+func (s *Server) acquireSSE(userID string) bool {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	if s.sseByUser[userID] >= maxSSEPerUser {
+		return false
+	}
+	s.sseByUser[userID]++
+	return true
+}
+
+func (s *Server) releaseSSE(userID string) {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	if s.sseByUser[userID] > 0 {
+		s.sseByUser[userID]--
+	}
+	if s.sseByUser[userID] == 0 {
+		delete(s.sseByUser, userID)
 	}
 }
 

@@ -3,13 +3,16 @@ package httpapi
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/go-chi/httprate"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"subtitleextractor/internal/audit"
 	"subtitleextractor/internal/auth"
 	"subtitleextractor/internal/config"
 	"subtitleextractor/internal/events"
@@ -20,19 +23,28 @@ import (
 	"subtitleextractor/internal/workers"
 )
 
+// maxSSEPerUser caps the number of concurrent event streams a single user may
+// hold open, so a client can't exhaust connections by opening many SSE requests.
+const maxSSEPerUser = 8
+
 // Server holds the handler dependencies.
 type Server struct {
 	cfg      *config.Config
+	pool     *pgxpool.Pool
 	users    *users.Repo
 	jobs     *jobs.Repo
 	settings *settings.Repo
 	workers  *workers.Repo
+	audit    *audit.Repo
 	sessions *auth.SessionManager
 	authn    *auth.Authenticator
 	oidc     *auth.OIDC // nil when OIDC is disabled
 	store    storage.Storage
 	hub      *events.Hub
 	cleaner  *VideoCleaner // set post-construction; nil until StartVideoCleaner
+
+	sseMu     sync.Mutex
+	sseByUser map[string]int // active SSE streams per user id
 }
 
 // SetVideoCleaner attaches the retention cleaner so admin endpoints can trigger
@@ -40,12 +52,13 @@ type Server struct {
 func (s *Server) SetVideoCleaner(vc *VideoCleaner) { s.cleaner = vc }
 
 // NewServer constructs the server with its dependencies.
-func NewServer(cfg *config.Config, repo *users.Repo, jobRepo *jobs.Repo, settingsRepo *settings.Repo,
-	workerRepo *workers.Repo, sessions *auth.SessionManager, authn *auth.Authenticator,
+func NewServer(cfg *config.Config, pool *pgxpool.Pool, repo *users.Repo, jobRepo *jobs.Repo, settingsRepo *settings.Repo,
+	workerRepo *workers.Repo, auditRepo *audit.Repo, sessions *auth.SessionManager, authn *auth.Authenticator,
 	oidc *auth.OIDC, store storage.Storage) *Server {
 	return &Server{
-		cfg: cfg, users: repo, jobs: jobRepo, settings: settingsRepo, workers: workerRepo,
-		sessions: sessions, authn: authn, oidc: oidc, store: store, hub: events.NewHub(),
+		cfg: cfg, pool: pool, users: repo, jobs: jobRepo, settings: settingsRepo, workers: workerRepo,
+		audit: auditRepo, sessions: sessions, authn: authn, oidc: oidc, store: store, hub: events.NewHub(),
+		sseByUser: map[string]int{},
 	}
 }
 
@@ -54,7 +67,7 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(jsonLogger)
 	r.Use(middleware.Recoverer)
 
 	if len(s.cfg.CORSOrigins) > 0 {
@@ -68,6 +81,7 @@ func (s *Server) Router() http.Handler {
 	}
 
 	r.Get("/healthz", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
@@ -88,11 +102,22 @@ func (s *Server) Router() http.Handler {
 			}
 		})
 
-		// Authenticated job endpoints.
+		// Per-user (falling back to per-IP) rate limit for the upload endpoint, to
+		// bound how fast a single account/client can enqueue expensive jobs.
+		uploadLimit := httprate.Limit(20, time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+			if u := auth.UserFromContext(r.Context()); u != nil {
+				return "u:" + u.ID, nil
+			}
+			return httprate.KeyByIP(r)
+		}))
+
+		// Authenticated job endpoints. The Origin/Referer CSRF guard protects the
+		// cookie-authenticated mutating routes.
 		r.Group(func(r chi.Router) {
 			r.Use(s.authn.RequireAuth)
+			r.Use(s.sameOriginGuard)
 			r.Get("/workers/availability", s.handleWorkerAvailability)
-			r.Post("/jobs", s.handleCreateJob)
+			r.With(uploadLimit).Post("/jobs", s.handleCreateJob)
 			r.Get("/jobs", s.handleListJobs)
 			r.Get("/jobs/{id}", s.handleGetJob)
 			r.Post("/jobs/{id}/cancel", s.handleCancelJob)
@@ -111,7 +136,7 @@ func (s *Server) Router() http.Handler {
 
 		// Admin endpoints — authenticated + admin only.
 		r.Group(func(r chi.Router) {
-			r.Use(s.authn.RequireAuth, s.authn.RequireAdmin)
+			r.Use(s.authn.RequireAuth, s.authn.RequireAdmin, s.sameOriginGuard)
 			r.Get("/admin/users", s.handleAdminListUsers)
 			r.Post("/admin/users", s.handleAdminCreateUser)
 			r.Patch("/admin/users/{id}", s.handleAdminPatchUser)

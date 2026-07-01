@@ -49,6 +49,7 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create user")
 		return
 	}
+	s.recordAudit(r, "user.create", u.ID, map[string]any{"email": u.Email, "isAdmin": u.IsAdmin})
 	writeJSON(w, http.StatusCreated, u)
 }
 
@@ -77,10 +78,18 @@ func (s *Server) handleAdminPatchUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "you can't revoke your own admin role")
 			return
 		}
+		// Guard against demoting the last remaining admin (system-wide lockout).
+		if !*body.IsAdmin {
+			if n, err := s.users.CountAdmins(r.Context()); err == nil && n <= 1 {
+				writeError(w, http.StatusConflict, "cannot demote the last remaining admin")
+				return
+			}
+		}
 		if err := s.users.SetAdmin(r.Context(), id, *body.IsAdmin); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update user")
 			return
 		}
+		s.recordAudit(r, "user.setAdmin", id, map[string]any{"isAdmin": *body.IsAdmin})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -91,10 +100,29 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "you can't delete your own account here")
 		return
 	}
+	target, err := s.users.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	// Guard against deleting the last remaining admin (system-wide lockout).
+	if target.IsAdmin {
+		if n, err := s.users.CountAdmins(r.Context()); err == nil && n <= 1 {
+			writeError(w, http.StatusConflict, "cannot delete the last remaining admin")
+			return
+		}
+	}
+	// Enumerate the user's blobs (inputs + results) before the DB cascade removes
+	// the rows, so we can free their storage. Cleanup is best-effort.
+	keys, _ := s.jobs.StorageKeysForUser(r.Context(), id)
 	if err := s.users.Delete(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete user")
 		return
 	}
+	for _, k := range keys {
+		_ = s.store.Delete(r.Context(), k)
+	}
+	s.recordAudit(r, "user.delete", id, map[string]any{"email": target.Email, "blobsDeleted": len(keys)})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -127,6 +155,7 @@ func (s *Server) handleAdminPutSettings(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to save settings")
 		return
 	}
+	s.recordAudit(r, "settings.update", "app_settings", nil)
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -191,20 +220,37 @@ func (s *Server) handleAdminPatchWorker(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusInternalServerError, "failed to update worker")
 			return
 		}
+		s.recordAudit(r, "worker.setEnabled", id, map[string]any{"enabled": *body.Enabled})
 	}
 	if len(body.Config) > 0 {
 		if err := s.workers.UpdateConfig(r.Context(), id, body.Config); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update worker config")
 			return
 		}
+		s.recordAudit(r, "worker.updateConfig", id, nil)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleAdminDeleteWorker(w http.ResponseWriter, r *http.Request) {
-	if err := s.workers.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
+	id := chi.URLParam(r, "id")
+	if err := s.workers.Delete(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete worker")
 		return
 	}
+	s.recordAudit(r, "worker.delete", id, nil)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// recordAudit writes an audit entry attributed to the current admin. Best-effort:
+// a logging failure must not fail the mutation that already succeeded.
+func (s *Server) recordAudit(r *http.Request, action, target string, detail any) {
+	if s.audit == nil {
+		return
+	}
+	var actorID string
+	if me := auth.UserFromContext(r.Context()); me != nil {
+		actorID = me.ID
+	}
+	_ = s.audit.Record(r.Context(), actorID, action, target, detail)
 }

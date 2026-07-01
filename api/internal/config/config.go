@@ -3,7 +3,7 @@ package config
 
 import (
 	"errors"
-	"log"
+	"fmt"
 	"strings"
 	"time"
 
@@ -38,6 +38,9 @@ type Config struct {
 
 	InternalAPIToken       string        `env:"INTERNAL_API_TOKEN,required"`
 	WorkerHeartbeatTimeout time.Duration `env:"WORKER_HEARTBEAT_TIMEOUT" envDefault:"2m"`
+
+	// MaxUploadBytes caps the size of an uploaded source video (default 2 GiB).
+	MaxUploadBytes int64 `env:"MAX_UPLOAD_BYTES" envDefault:"2147483648"`
 }
 
 // AuthConfig controls the available authentication methods.
@@ -87,7 +90,7 @@ func Load() (*Config, error) {
 		return nil, errors.New("INTERNAL_API_TOKEN is still the .env.example placeholder; set a real secret (e.g. `openssl rand -hex 32`)")
 	}
 	if len(cfg.JWTSigningKey) < 32 {
-		log.Printf("WARNING: JWT_SIGNING_KEY is shorter than 32 bytes (%d); use at least 32 bytes (e.g. `openssl rand -hex 32`)", len(cfg.JWTSigningKey))
+		return nil, fmt.Errorf("JWT_SIGNING_KEY is shorter than 32 bytes (%d); use at least 32 bytes (e.g. `openssl rand -hex 32`)", len(cfg.JWTSigningKey))
 	}
 
 	// Resolve the session-cookie Secure flag: honor an explicit override,

@@ -144,12 +144,19 @@ func (r *Repo) Claim(ctx context.Context, workerID string, classes []string) (*J
 		RETURNING `+jobColumns, workerID, classes))
 }
 
-// UpdateProgress sets progress percent and stage.
-func (r *Repo) UpdateProgress(ctx context.Context, id string, pct int, stage string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE jobs SET progress_pct=$2, progress_stage=$3, last_heartbeat=now() WHERE id=$1`,
+// UpdateProgress sets progress percent and stage, but only while the job is
+// still running. It returns applied=false when no running row matched (the job
+// was canceled/requeued/finished), letting the caller signal the worker to stop
+// in a single round-trip instead of a separate cancel check.
+func (r *Repo) UpdateProgress(ctx context.Context, id string, pct int, stage string) (applied bool, err error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE jobs SET progress_pct=$2, progress_stage=$3, last_heartbeat=now()
+		 WHERE id=$1 AND status='running'`,
 		id, pct, stage)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // Heartbeat refreshes the liveness timestamp.
@@ -262,6 +269,36 @@ func (r *Repo) ResultByID(ctx context.Context, id string) (*Result, error) {
 func (r *Repo) DeleteResult(ctx context.Context, id string) error {
 	_, err := r.pool.Exec(ctx, `DELETE FROM job_results WHERE id=$1`, id)
 	return err
+}
+
+// DeleteResultCascade removes one result and, if it was the job's last result,
+// deletes the job too — atomically in a single transaction so a concurrent
+// delete can't race to leave a job with zero results (or double-delete it).
+// Returns jobDeleted=true when the whole job (and its cascaded rows) was removed.
+func (r *Repo) DeleteResultCascade(ctx context.Context, jobID, resultID string) (jobDeleted bool, err error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err = tx.Exec(ctx, `DELETE FROM job_results WHERE id=$1 AND job_id=$2`, resultID, jobID); err != nil {
+		return false, err
+	}
+	var remaining int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM job_results WHERE job_id=$1`, jobID).Scan(&remaining); err != nil {
+		return false, err
+	}
+	if remaining == 0 {
+		if _, err = tx.Exec(ctx, `DELETE FROM jobs WHERE id=$1`, jobID); err != nil {
+			return false, err
+		}
+		jobDeleted = true
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return jobDeleted, nil
 }
 
 // Results lists a job's artifacts.
@@ -395,15 +432,31 @@ func (r *Repo) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-// IsCanceled reports whether a job is canceled or no longer exists (both mean
-// a worker should stop processing it).
-func (r *Repo) IsCanceled(ctx context.Context, id string) bool {
-	var status string
-	err := r.pool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, id).Scan(&status)
+// StorageKeysForUser returns every storage key (source-video inputs + result
+// artifacts) belonging to a user's jobs, so the blobs can be deleted before the
+// DB rows cascade away on user deletion.
+func (r *Repo) StorageKeysForUser(ctx context.Context, userID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT input_key FROM jobs WHERE user_id=$1
+		UNION ALL
+		SELECT res.storage_key FROM job_results res
+		JOIN jobs j ON j.id = res.job_id
+		WHERE j.user_id=$1`, userID)
 	if err != nil {
-		return true // gone == stop
+		return nil, err
 	}
-	return status == "canceled"
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		if k != "" {
+			out = append(out, k)
+		}
+	}
+	return out, rows.Err()
 }
 
 // RequeueStale re-queues jobs whose heartbeat expired, failing them past 3 attempts.

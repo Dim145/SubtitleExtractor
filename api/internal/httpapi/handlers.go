@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"io"
@@ -19,6 +20,30 @@ import (
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReady is a readiness probe: it verifies the database is reachable and
+// that the storage backend responds. /healthz stays a pure liveness check.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if s.pool != nil {
+		if err := s.pool.Ping(ctx); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "database unavailable")
+			return
+		}
+	}
+	// Cheap storage reachability probe: a Stat on a key that shouldn't exist. A
+	// "not found" style response means the backend is reachable and healthy; only
+	// a transport/credential failure (context deadline, connection refused) is a
+	// readiness failure.
+	if _, err := s.store.Stat(ctx, "healthz/readiness-probe"); err != nil {
+		if ctx.Err() != nil {
+			writeError(w, http.StatusServiceUnavailable, "storage unavailable")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 // --- auth config (consumed by the frontend login screen) -----------------
@@ -86,7 +111,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create user")
 		return
 	}
-	if err := s.sessions.Issue(w, u.ID); err != nil {
+	if err := s.sessions.Issue(w, u.ID, u.TokenVersion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start session")
 		return
 	}
@@ -105,6 +130,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
 	u, err := s.users.GetByEmail(r.Context(), body.Email)
 	if err != nil || u.Provider != "local" || u.PasswordHash == nil {
+		// Run a dummy verify against a constant hash so the response time for an
+		// unknown/OIDC account matches the found-user path (no enumeration signal).
+		_, _ = auth.VerifyPassword(body.Password, auth.DummyHash)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -113,7 +141,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-	if err := s.sessions.Issue(w, u.ID); err != nil {
+	if err := s.sessions.Issue(w, u.ID, u.TokenVersion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start session")
 		return
 	}
@@ -121,6 +149,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Best-effort: bump the user's token_version so the just-cleared token (and
+	// any other sessions) can't be replayed. Failures here don't block logout.
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
+		if uid, _, perr := s.sessions.Parse(c.Value); perr == nil {
+			_ = s.users.BumpTokenVersion(r.Context(), uid)
+		}
+	}
 	s.sessions.Clear(w)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -214,6 +249,15 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to reload profile")
 		return
 	}
+	// A password change bumped token_version (invalidating all sessions). Re-issue
+	// a fresh cookie for the current request so the caller isn't logged out here,
+	// while any *other* outstanding tokens remain revoked.
+	if pwChange {
+		if err := s.sessions.Issue(w, updated.ID, updated.TokenVersion); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to refresh session")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -276,7 +320,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.clearFlowCookie(w, oidcStateCookie)
 	s.clearFlowCookie(w, oidcNonceCookie)
 	s.clearFlowCookie(w, oidcPKCECookie)
-	if err := s.sessions.Issue(w, u.ID); err != nil {
+	if err := s.sessions.Issue(w, u.ID, u.TokenVersion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start session")
 		return
 	}

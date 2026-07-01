@@ -67,7 +67,11 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	workerID := r.Header.Get("X-Worker-Id")
 	if workerID == "" {
-		workerID = "worker-" + workerClass
+		// Require a stable per-worker identity: claimed_by must uniquely name the
+		// worker so ownership can be enforced on later posts. Refuse to synthesize
+		// a shared "worker-<class>" identity.
+		writeError(w, http.StatusBadRequest, "X-Worker-Id header is required")
+		return
 	}
 
 	// A disabled worker is not allowed to take new jobs.
@@ -105,38 +109,49 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 // workerID returns the identity the worker presents on /internal calls. It
-// mirrors the fallback used in handleClaim so the value matches the job's
-// claimed_by column set at claim time.
+// matches the X-Worker-Id the worker used at claim time, which is stored in the
+// job's claimed_by column and enforced by bindWorker.
 func workerID(r *http.Request) string {
 	return r.Header.Get("X-Worker-Id")
 }
 
-// bindWorker verifies that the job in the URL exists and is owned by the worker
-// making the request (i.e. the worker that claimed it). It writes the
-// appropriate error response and returns ok=false when the call should be
-// rejected. This stops one worker from mutating another worker's job by id.
-func (s *Server) bindWorker(w http.ResponseWriter, r *http.Request, id string) bool {
+// bindWorker verifies that the job in the URL exists and is genuinely owned by
+// the worker making the request. It returns the fetched job so callers can
+// avoid a second round-trip. On any ownership/state failure it writes the
+// response and returns ok=false.
+//
+// Rules (item 12 — prevent double-processing after a stale requeue):
+//   - the worker must present X-Worker-Id;
+//   - the job must be in an active state (running/claimed) — a requeued/finished
+//     job returns 409 so the worker aborts;
+//   - claimed_by must equal the caller's worker id. A nil claimed_by on a
+//     non-terminal job means it was requeued away from this worker → not yours.
+func (s *Server) bindWorker(w http.ResponseWriter, r *http.Request, id string) (*jobs.Job, bool) {
 	job, err := s.jobs.Get(r.Context(), id)
 	if err != nil {
-		// The job vanished (deleted/canceled out from under the worker). Reply
-		// with 409 — the same "stop now" signal as cancellation — so the worker
-		// aborts this job gracefully and returns to its claim loop, rather than
-		// hard-erroring on a 404. (Before this binding existed these posts were
-		// silent 0-row no-ops.)
+		// The job vanished (deleted). Reply 409 — the "stop now" signal — so the
+		// worker aborts gracefully and returns to its claim loop.
 		writeError(w, http.StatusConflict, "job no longer exists")
-		return false
+		return nil, false
 	}
-	// Security: a worker may not mutate a job claimed by a *different* worker.
-	// claimed_by is set to the worker's X-Worker-Id at claim time. Unclaimed
-	// jobs (claimed_by nil) and workers that omit the header pass through — the
-	// goal here is only to stop cross-worker tampering, not to gate normal posts.
-	if job.ClaimedBy != nil {
-		if wid := workerID(r); wid != "" && wid != *job.ClaimedBy {
-			writeError(w, http.StatusForbidden, "job claimed by another worker")
-			return false
-		}
+	wid := workerID(r)
+	if wid == "" {
+		writeError(w, http.StatusBadRequest, "X-Worker-Id header is required")
+		return nil, false
 	}
-	return true
+	// The job must still be active; a requeued or finished job is no longer this
+	// worker's to touch.
+	if job.Status != "running" && job.Status != "claimed" {
+		writeError(w, http.StatusConflict, "job is no longer active")
+		return nil, false
+	}
+	// Ownership: nil claimed_by on an active job means it was requeued out from
+	// under this worker; a different claimed_by means another worker owns it.
+	if job.ClaimedBy == nil || *job.ClaimedBy != wid {
+		writeError(w, http.StatusConflict, "job is claimed by another worker")
+		return nil, false
+	}
+	return job, true
 }
 
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
@@ -149,16 +164,18 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if !s.bindWorker(w, r, id) {
+	if _, ok := s.bindWorker(w, r, id); !ok {
 		return
 	}
-	// Tell the worker to abort if the job was canceled or deleted.
-	if s.jobs.IsCanceled(r.Context(), id) {
-		writeError(w, http.StatusConflict, "job canceled")
-		return
-	}
-	if err := s.jobs.UpdateProgress(r.Context(), id, body.Pct, body.Stage); err != nil {
+	// Single round-trip: update only while running, and use rows-affected to
+	// detect cancellation/requeue. No running row → tell the worker to abort.
+	applied, err := s.jobs.UpdateProgress(r.Context(), id, body.Pct, body.Stage)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update progress")
+		return
+	}
+	if !applied {
+		writeError(w, http.StatusConflict, "job canceled")
 		return
 	}
 	s.hub.Publish(id, events.Event{Type: "progress", Data: map[string]any{"pct": body.Pct, "stage": body.Stage}})
@@ -171,11 +188,7 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !s.bindWorker(w, r, id) {
-		return
-	}
-	if s.jobs.IsCanceled(r.Context(), id) {
-		writeError(w, http.StatusConflict, "job canceled")
+	if _, ok := s.bindWorker(w, r, id); !ok {
 		return
 	}
 	if err := s.jobs.Heartbeat(r.Context(), id); err != nil {
@@ -194,7 +207,7 @@ func (s *Server) handleInternalLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	if !s.bindWorker(w, r, id) {
+	if _, ok := s.bindWorker(w, r, id); !ok {
 		return
 	}
 	if err := s.jobs.AppendLog(r.Context(), id, body.Level, body.Message); err != nil {
@@ -209,7 +222,7 @@ func (s *Server) handleInternalLog(w http.ResponseWriter, r *http.Request) {
 // language, sha256 + the file part) and records it against the job.
 func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
-	if !s.bindWorker(w, r, jobID) {
+	if _, ok := s.bindWorker(w, r, jobID); !ok {
 		return
 	}
 
@@ -281,7 +294,7 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := chi.URLParam(r, "id")
-	if !s.bindWorker(w, r, jobID) {
+	if _, ok := s.bindWorker(w, r, jobID); !ok {
 		return
 	}
 	if err := s.jobs.Complete(r.Context(), jobID, body.Status == "success", body.Error); err != nil {

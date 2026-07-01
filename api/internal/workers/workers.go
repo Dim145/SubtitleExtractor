@@ -36,9 +36,13 @@ type Worker struct {
 	CreatedAt       time.Time       `json:"createdAt"`
 }
 
-func deriveStatus(lastHB *time.Time, currentJob *string) string {
+func deriveStatus(enabled bool, lastHB *time.Time, currentJob *string) string {
 	if currentJob != nil {
 		return "busy"
+	}
+	// A disabled worker can't take jobs, so it must never read as "online".
+	if !enabled {
+		return "offline"
 	}
 	if lastHB != nil && time.Since(*lastHB) < offlineAfter {
 		return "online"
@@ -67,7 +71,7 @@ func scan(row pgx.Row) (*Worker, error) {
 		return nil, err
 	}
 	w.CurrentJobLabel = label
-	w.Status = deriveStatus(w.LastHeartbeat, w.CurrentJobID)
+	w.Status = deriveStatus(w.Enabled, w.LastHeartbeat, w.CurrentJobID)
 	return &w, nil
 }
 

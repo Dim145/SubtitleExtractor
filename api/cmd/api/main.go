@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"subtitleextractor/internal/audit"
 	"subtitleextractor/internal/auth"
 	"subtitleextractor/internal/cleanup"
 	"subtitleextractor/internal/config"
@@ -35,7 +36,9 @@ func run() error {
 		return err
 	}
 
-	ctx := context.Background()
+	// Root context canceled on SIGINT/SIGTERM; background goroutines observe it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -59,6 +62,7 @@ func run() error {
 	jobRepo := jobs.NewRepo(pool)
 	settingsRepo := settings.NewRepo(pool)
 	workerRepo := workers.NewRepo(pool)
+	auditRepo := audit.NewRepo(pool)
 	sessions := auth.NewSessionManager(cfg.JWTSigningKey, cfg.SessionTTL, cfg.SessionCookieSecure)
 	authn := auth.NewAuthenticator(sessions, userRepo)
 
@@ -71,7 +75,7 @@ func run() error {
 		log.Printf("OIDC enabled (issuer: %s)", cfg.Auth.OIDCIssuerURL)
 	}
 
-	srv := httpapi.NewServer(cfg, userRepo, jobRepo, settingsRepo, workerRepo, sessions, authn, oidcProvider, store)
+	srv := httpapi.NewServer(cfg, pool, userRepo, jobRepo, settingsRepo, workerRepo, auditRepo, sessions, authn, oidcProvider, store)
 
 	// Re-queue jobs whose worker stopped heart-beating.
 	httpapi.StartStaleRequeuer(ctx, jobRepo, workerRepo, cfg.WorkerHeartbeatTimeout, log.Printf)
@@ -86,11 +90,12 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Graceful shutdown on SIGINT/SIGTERM.
+	// Graceful shutdown: when the root context is canceled (SIGINT/SIGTERM),
+	// stop accepting requests and drain in-flight ones. The background goroutines
+	// (requeuer, cleaner) observe the same ctx.Done() and return, after which the
+	// deferred pool.Close() is safe.
 	go func() {
-		stop := make(chan os.Signal, 1)
-		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-		<-stop
+		<-ctx.Done()
 		log.Println("shutting down...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

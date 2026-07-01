@@ -65,7 +65,7 @@ func (vc *VideoCleaner) tick(ctx context.Context) {
 		vc.logf("video cleanup: invalid cron %q: %v", st.VideoCleanupCron, err)
 		return
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if !sched.Matches(now) {
 		return
 	}
@@ -137,7 +137,14 @@ func (vc *VideoCleaner) execute(ctx context.Context, trigger string, retentionDa
 				if blob, err := vc.store.Stat(ctx, ref.InputKey); err == nil {
 					size = blob.Size
 				}
-				_ = vc.store.Delete(ctx, ref.InputKey) // best-effort; mark regardless
+				// Only mark the video deleted (and count freed bytes) when the blob
+				// was actually removed; a failed delete leaves the row untouched so
+				// the next run retries it.
+				if err := vc.store.Delete(ctx, ref.InputKey); err != nil {
+					vc.logf("video cleanup: delete blob for job %s: %v", ref.ID, err)
+					failures++
+					continue
+				}
 			}
 			if err := vc.jobs.MarkVideoDeleted(ctx, ref.ID); err != nil {
 				vc.logf("video cleanup: mark job %s: %v", ref.ID, err)

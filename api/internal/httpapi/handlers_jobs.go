@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -24,6 +25,9 @@ const downloadTTL = time.Hour
 // optional parameter fields), stores the video, and queues an extraction job.
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
+	// Cap the whole request body (headers + all parts) so a client can't stream
+	// an unbounded upload. MaxBytesReader makes reads past the limit fail.
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes)
 	mr, err := r.MultipartReader()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "expected multipart/form-data")
@@ -41,15 +45,29 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "malformed multipart body")
+			// A MaxBytesReader overflow surfaces here as a read error.
+			writeError(w, http.StatusRequestEntityTooLarge, "upload too large or malformed multipart body")
 			return
 		}
 		if part.FormName() == "file" {
 			filename = sanitizeFilename(part.FileName())
+			if !allowedVideoExt(filename) {
+				part.Close()
+				writeError(w, http.StatusBadRequest, "unsupported file type (expected a video: .mp4 .mkv .webm .mov .avi .m4v .ts)")
+				return
+			}
 			inputKey = "inputs/" + uuid.NewString() + "/" + filename
-			ct := part.Header.Get("Content-Type")
+			// Don't trust the client Content-Type for storage; derive it from the
+			// (whitelisted) extension instead.
+			ct := videoContentType(filename)
 			if err := s.store.Put(r.Context(), inputKey, part, -1, ct); err != nil {
 				part.Close()
+				// Best-effort cleanup so a failed store doesn't orphan a partial blob.
+				_ = s.store.Delete(r.Context(), inputKey)
+				if isMaxBytesError(err) {
+					writeError(w, http.StatusRequestEntityTooLarge, "upload exceeds the maximum allowed size")
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "failed to store upload")
 				return
 			}
@@ -198,10 +216,12 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]resultDTO, 0, len(results))
 	for _, res := range results {
+		// A single presign failure shouldn't fail the whole batch: return that
+		// result with an empty downloadUrl (the client can fall back to the
+		// same-origin /download route).
 		url, err := s.store.PresignGet(r.Context(), res.StorageKey, downloadTTL)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to sign download URL")
-			return
+			url = ""
 		}
 		out = append(out, resultDTO{Result: res, DownloadURL: url})
 	}
@@ -334,29 +354,21 @@ func (s *Server) handleDeleteResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "result not found")
 		return
 	}
-	// Delete the DB row first so the user-facing state is consistent even if a
-	// storage delete later fails (an orphaned blob is harmless; a dangling row
-	// pointing at a missing object is not). Storage cleanup is best-effort.
-	if err := s.jobs.DeleteResult(r.Context(), res.ID); err != nil {
+	// Delete the result row and (if it was the last one) the job row atomically in
+	// a single transaction, so a concurrent delete can't leave a resultless job or
+	// double-delete. Blob cleanup is best-effort afterwards; an orphaned blob is
+	// harmless whereas a row pointing at a missing object is not.
+	jobDeleted, err := s.jobs.DeleteResultCascade(r.Context(), job.ID, res.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete result")
 		return
 	}
-	remaining, _ := s.jobs.Results(r.Context(), job.ID)
-	if len(remaining) == 0 {
-		// Last result: delete the job row before touching the input object so we
-		// never orphan a job whose input has already been removed.
-		if err := s.jobs.Delete(r.Context(), job.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to delete job")
-			return
-		}
-		_ = s.workers.ClearJob(r.Context(), job.ID)
-		_ = s.store.Delete(r.Context(), res.StorageKey)
-		_ = s.store.Delete(r.Context(), job.InputKey)
-		writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": true})
-		return
-	}
 	_ = s.store.Delete(r.Context(), res.StorageKey)
-	writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": false})
+	if jobDeleted {
+		_ = s.workers.ClearJob(r.Context(), job.ID)
+		_ = s.store.Delete(r.Context(), job.InputKey)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"jobDeleted": jobDeleted})
 }
 
 // handleWorkerAvailability returns aggregate worker counts (no names/config) so
@@ -466,11 +478,14 @@ func (s *Server) handleDeleteVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if job.VideoDeletedAt == nil {
-		_ = s.store.Delete(r.Context(), job.InputKey) // best-effort
+		// Mark the DB first so state is consistent even if the blob delete fails
+		// (mirrors handleDeleteJob): an orphaned blob is harmless, a row claiming a
+		// present video that's actually gone is not. Blob delete is best-effort.
 		if err := s.jobs.MarkVideoDeleted(r.Context(), job.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to delete video")
 			return
 		}
+		_ = s.store.Delete(r.Context(), job.InputKey)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -550,11 +565,12 @@ func (s *Server) handleVideoStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rc.Close()
-	ct := "video/mp4"
-	if blob, err := s.store.Stat(r.Context(), job.InputKey); err == nil && blob.ContentType != "" {
-		ct = blob.ContentType
-	}
+	// Derive a safe content-type from the source filename's (whitelisted)
+	// extension rather than trusting any stored/sniffed value, and forbid
+	// content-type sniffing on the re-served blob.
+	ct := videoContentType(job.SourceFilename)
 	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if rs, ok := rc.(io.ReadSeeker); ok {
 		// ServeContent handles Range, Content-Length and conditional requests.
 		http.ServeContent(w, r, job.SourceFilename, time.Time{}, rs)
@@ -578,6 +594,39 @@ func (s *Server) ownedJob(w http.ResponseWriter, r *http.Request) (*jobs.Job, bo
 	return job, true
 }
 
+// videoContentTypes maps the accepted video extensions to a safe content-type
+// used for storage (never the client-supplied Content-Type).
+var videoContentTypes = map[string]string{
+	".mp4":  "video/mp4",
+	".m4v":  "video/mp4",
+	".mkv":  "video/x-matroska",
+	".webm": "video/webm",
+	".mov":  "video/quicktime",
+	".avi":  "video/x-msvideo",
+	".ts":   "video/mp2t",
+}
+
+// allowedVideoExt reports whether name has a whitelisted video extension.
+func allowedVideoExt(name string) bool {
+	_, ok := videoContentTypes[strings.ToLower(filepath.Ext(name))]
+	return ok
+}
+
+// videoContentType returns the storage content-type derived from the (already
+// validated) extension, defaulting to a generic video type.
+func videoContentType(name string) string {
+	if ct, ok := videoContentTypes[strings.ToLower(filepath.Ext(name))]; ok {
+		return ct
+	}
+	return "application/octet-stream"
+}
+
+// isMaxBytesError reports whether err is a MaxBytesReader overflow.
+func isMaxBytesError(err error) bool {
+	var mbe *http.MaxBytesError
+	return errors.As(err, &mbe)
+}
+
 // resultBase returns the filename portion of a saved-result storage key: the
 // provided (already-sanitized) name when present, else a kind-derived default.
 func resultBase(name, kind string) string {
@@ -587,12 +636,34 @@ func resultBase(name, kind string) string {
 	return "edited." + kind
 }
 
-// sanitizeFilename strips any path components from an uploaded filename.
+// sanitizeFilename strips any path components from an uploaded filename and
+// restricts it to a safe charset ([A-Za-z0-9._-], others → "_", collapsed).
+// This also keeps storage keys free of the ':' used by the local-storage token
+// format, so VerifyToken's key:exp:hmac split can't be confused by a filename.
 func sanitizeFilename(name string) string {
 	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." {
 		return "upload.bin"
 	}
-	return name
+	var b strings.Builder
+	lastUnderscore := false
+	for _, ch := range name {
+		safe := (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+			(ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-'
+		if safe {
+			b.WriteRune(ch)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore { // collapse runs of replaced chars into one "_"
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" || out == "." || out == ".." {
+		return "upload.bin"
+	}
+	return out
 }

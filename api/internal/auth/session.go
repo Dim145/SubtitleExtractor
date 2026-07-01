@@ -18,18 +18,29 @@ type SessionManager struct {
 	secure bool
 }
 
+// sessionClaims carries the standard registered claims plus a per-user token
+// version, so bumping the DB token_version revokes previously issued tokens.
+type sessionClaims struct {
+	jwt.RegisteredClaims
+	TokenVersion int `json:"tv"`
+}
+
 // NewSessionManager creates a manager with the given signing key and lifetime.
 func NewSessionManager(signingKey string, ttl time.Duration, secure bool) *SessionManager {
 	return &SessionManager{key: []byte(signingKey), ttl: ttl, secure: secure}
 }
 
-// Issue signs a session for userID and writes it as an httpOnly cookie.
-func (s *SessionManager) Issue(w http.ResponseWriter, userID string) error {
+// Issue signs a session for userID (with its current token version) and writes
+// it as an httpOnly cookie.
+func (s *SessionManager) Issue(w http.ResponseWriter, userID string, tokenVersion int) error {
 	now := time.Now()
-	claims := jwt.RegisteredClaims{
-		Subject:   userID,
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(s.ttl)),
+	claims := sessionClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   userID,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.ttl)),
+		},
+		TokenVersion: tokenVersion,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(s.key)
@@ -49,9 +60,11 @@ func (s *SessionManager) Issue(w http.ResponseWriter, userID string) error {
 	return nil
 }
 
-// Parse validates a session token string and returns its user ID.
-func (s *SessionManager) Parse(tokenStr string) (string, error) {
-	claims := &jwt.RegisteredClaims{}
+// Parse validates a session token string and returns its user ID and the token
+// version embedded in the claim (the caller compares it against the current DB
+// value to enforce revocation on logout/password change).
+func (s *SessionManager) Parse(tokenStr string) (userID string, tokenVersion int, err error) {
+	claims := &sessionClaims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
@@ -59,12 +72,12 @@ func (s *SessionManager) Parse(tokenStr string) (string, error) {
 		return s.key, nil
 	})
 	if err != nil || !token.Valid {
-		return "", errors.New("invalid session")
+		return "", 0, errors.New("invalid session")
 	}
 	if claims.Subject == "" {
-		return "", errors.New("invalid session subject")
+		return "", 0, errors.New("invalid session subject")
 	}
-	return claims.Subject, nil
+	return claims.Subject, claims.TokenVersion, nil
 }
 
 // Clear removes the session cookie.

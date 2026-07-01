@@ -24,6 +24,7 @@ type User struct {
 	OIDCIssuer   *string   `json:"-"`
 	OIDCSubject  *string   `json:"-"`
 	IsAdmin      bool      `json:"isAdmin"`
+	TokenVersion int       `json:"-"`
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
@@ -37,13 +38,13 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-const selectColumns = `id, email, display_name, provider, password_hash, oidc_issuer, oidc_subject, is_admin, created_at`
+const selectColumns = `id, email, display_name, provider, password_hash, oidc_issuer, oidc_subject, is_admin, token_version, created_at`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
 	var displayName *string
 	err := row.Scan(&u.ID, &u.Email, &displayName, &u.Provider, &u.PasswordHash,
-		&u.OIDCIssuer, &u.OIDCSubject, &u.IsAdmin, &u.CreatedAt)
+		&u.OIDCIssuer, &u.OIDCSubject, &u.IsAdmin, &u.TokenVersion, &u.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -118,9 +119,11 @@ func (r *Repo) UpdateProfile(ctx context.Context, id, displayName, email string)
 		RETURNING `+selectColumns, id, displayName, email))
 }
 
-// SetPassword updates a user's password hash (local accounts).
+// SetPassword updates a user's password hash (local accounts). Changing the
+// password bumps token_version, invalidating any existing session tokens.
 func (r *Repo) SetPassword(ctx context.Context, id, passwordHash string) error {
-	_, err := r.pool.Exec(ctx, `UPDATE users SET password_hash=$2 WHERE id=$1`, id, passwordHash)
+	_, err := r.pool.Exec(ctx,
+		`UPDATE users SET password_hash=$2, token_version=token_version+1 WHERE id=$1`, id, passwordHash)
 	return err
 }
 
@@ -128,6 +131,19 @@ func (r *Repo) SetPassword(ctx context.Context, id, passwordHash string) error {
 func (r *Repo) SetAdmin(ctx context.Context, id string, isAdmin bool) error {
 	_, err := r.pool.Exec(ctx, `UPDATE users SET is_admin=$2 WHERE id=$1`, id, isAdmin)
 	return err
+}
+
+// BumpTokenVersion invalidates all existing session tokens for a user (logout).
+func (r *Repo) BumpTokenVersion(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE users SET token_version=token_version+1 WHERE id=$1`, id)
+	return err
+}
+
+// CountAdmins returns the number of admin users (guards last-admin lockout).
+func (r *Repo) CountAdmins(ctx context.Context) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_admin=true`).Scan(&n)
+	return n, err
 }
 
 // Delete removes a user (their jobs cascade).

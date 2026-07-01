@@ -32,13 +32,18 @@ func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		userID, err := a.sessions.Parse(cookie.Value)
+		userID, tokenVersion, err := a.sessions.Parse(cookie.Value)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		u, err := a.users.GetByID(r.Context(), userID)
 		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Reject tokens whose version is stale (logout / password change bumped it).
+		if tokenVersion != u.TokenVersion {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
