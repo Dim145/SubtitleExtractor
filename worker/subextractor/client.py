@@ -20,21 +20,60 @@ class JobCanceled(Exception):
 class APIClient:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
+        # The bootstrap INTERNAL_API_TOKEN is used ONLY for enrollment; every
+        # other /internal call authenticates with the per-worker token issued by
+        # enroll and sent as X-Worker-Token. Identity is derived server-side from
+        # that token, so we no longer send an (untrusted) X-Worker-Id header.
+        self._worker_token: str | None = None
         self._http = httpx.Client(
             base_url=cfg.api_base_url,
-            headers={
-                "Authorization": f"Bearer {cfg.internal_token}",
-                "X-Worker-Id": cfg.worker_name,
-            },
             timeout=httpx.Timeout(60.0, read=120.0),
         )
 
     def close(self) -> None:
         self._http.close()
 
+    # --- enrollment / per-worker auth -------------------------------------
+
+    def enroll(self) -> None:
+        """Exchange the bootstrap token for a per-worker token (rotates on each
+        call). Stores the returned token in memory for subsequent calls."""
+        resp = self._http.post(
+            "/api/internal/workers/enroll",
+            headers={"Authorization": f"Bearer {self._cfg.internal_token}"},
+            json={
+                "workerId": self._cfg.worker_name,
+                "workerClass": self._cfg.worker_class,
+                "capabilities": self._cfg.capabilities,
+            },
+        )
+        resp.raise_for_status()
+        self._worker_token = resp.json()["token"]
+        log.info("enrolled worker %s; obtained per-worker token", self._cfg.worker_name)
+
+    def _auth_headers(self) -> dict[str, str]:
+        if not self._worker_token:
+            self.enroll()
+        return {"X-Worker-Token": self._worker_token or ""}
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Send an authenticated /internal request. On 401 (token unknown or
+        rotated) re-enroll once and retry so a restarted API doesn't wedge us."""
+        headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+        resp = self._http.request(method, path, headers=headers, **kwargs)
+        if resp.status_code == 401:
+            log.info("per-worker token rejected (401); re-enrolling")
+            self.enroll()
+            headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+            resp = self._http.request(method, path, headers=headers, **kwargs)
+        return resp
+
+    # --- worker protocol --------------------------------------------------
+
     def worker_heartbeat(self) -> dict[str, Any]:
         """Register/refresh this worker and fetch its enabled flag + effective config."""
-        resp = self._http.post(
+        resp = self._request(
+            "POST",
             "/api/internal/workers/heartbeat",
             json={
                 "name": self._cfg.worker_name,
@@ -47,7 +86,7 @@ class APIClient:
 
     def claim(self) -> tuple[dict[str, Any], str] | None:
         """Claim the next job. Returns (job, input_url) or None if the queue is empty."""
-        resp = self._http.post("/api/internal/jobs/claim", params={"worker_class": self._cfg.worker_class})
+        resp = self._request("POST", "/api/internal/jobs/claim", params={"worker_class": self._cfg.worker_class})
         if resp.status_code == 204:
             return None
         resp.raise_for_status()
@@ -58,18 +97,18 @@ class APIClient:
         payload: dict[str, Any] = {"pct": int(pct), "stage": stage}
         if log:
             payload["log"] = log
-        resp = self._http.post(f"/api/internal/jobs/{job_id}/progress", json=payload)
+        resp = self._request("POST", f"/api/internal/jobs/{job_id}/progress", json=payload)
         if resp.status_code == 409:
             raise JobCanceled(job_id)
 
     def heartbeat(self, job_id: str) -> None:
-        resp = self._http.post(f"/api/internal/jobs/{job_id}/heartbeat")
+        resp = self._request("POST", f"/api/internal/jobs/{job_id}/heartbeat")
         if resp.status_code >= 300:
             log.warning("heartbeat for job %s returned HTTP %s", job_id, resp.status_code)
 
     def log(self, job_id: str, message: str, level: str = "info") -> None:
-        resp = self._http.post(
-            f"/api/internal/jobs/{job_id}/log", json={"level": level, "message": message}
+        resp = self._request(
+            "POST", f"/api/internal/jobs/{job_id}/log", json={"level": level, "message": message}
         )
         if resp.status_code >= 300:
             log.warning("log post for job %s returned HTTP %s", job_id, resp.status_code)
@@ -80,7 +119,7 @@ class APIClient:
             data = {"kind": kind}
             if language:
                 data["language"] = language
-            resp = self._http.put(f"/api/internal/jobs/{job_id}/result", files=files, data=data)
+            resp = self._request("PUT", f"/api/internal/jobs/{job_id}/result", files=files, data=data)
             resp.raise_for_status()
 
     def complete(self, job_id: str, success: bool, error: str | None = None) -> None:
@@ -93,7 +132,7 @@ class APIClient:
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                resp = self._http.post(f"/api/internal/jobs/{job_id}/complete", json=payload)
+                resp = self._request("POST", f"/api/internal/jobs/{job_id}/complete", json=payload)
                 if resp.status_code < 300:
                     return
                 log.warning(

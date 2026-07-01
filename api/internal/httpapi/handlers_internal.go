@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,11 +14,57 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"subtitleextractor/internal/auth"
 	"subtitleextractor/internal/events"
 	"subtitleextractor/internal/jobs"
 	"subtitleextractor/internal/settings"
 	"subtitleextractor/internal/workers"
 )
+
+// handleWorkerEnroll issues a per-worker token. It is guarded by the shared
+// bootstrap InternalAPIToken (the only route that still accepts it): a worker
+// presents the bootstrap secret once at startup, upserts its row, and receives a
+// random token whose SHA-256 hash is stored. The plaintext is returned ONCE and
+// never persisted; re-enrolling rotates the token.
+func (s *Server) handleWorkerEnroll(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WorkerID     string          `json:"workerId"`
+		WorkerClass  string          `json:"workerClass"`
+		Capabilities json.RawMessage `json:"capabilities"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.WorkerID == "" {
+		writeError(w, http.StatusBadRequest, "workerId required")
+		return
+	}
+	if body.WorkerClass == "" {
+		body.WorkerClass = "any"
+	}
+
+	// 32 random bytes → base64url (no padding); ~256 bits of entropy.
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+
+	wk, err := s.workers.Enroll(r.Context(), body.WorkerID, body.WorkerClass, body.Capabilities, auth.HashWorkerToken(token))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "enrollment failed")
+		return
+	}
+	if s.audit != nil {
+		_ = s.audit.Record(r.Context(), "", "worker.enroll", wk.ID, map[string]any{"name": wk.Name, "class": wk.WorkerClass})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workerId": wk.ID,
+		"name":     wk.Name,
+		"token":    token,
+	})
+}
 
 // handleWorkerHeartbeat upserts the worker (registration + liveness) and returns
 // its enabled flag plus effective config (global defaults overlaid by per-worker).
@@ -29,14 +77,23 @@ func (s *Server) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Name == "" {
-		writeError(w, http.StatusBadRequest, "worker name required")
+	// Identity comes from the per-worker token, not the request body: a worker
+	// cannot heartbeat as some other worker. The body still carries class +
+	// capabilities so admin config/UI stay fresh.
+	ident := auth.WorkerFromContext(r.Context())
+	if ident == nil {
+		writeError(w, http.StatusUnauthorized, "worker not authenticated")
 		return
 	}
-	if body.WorkerClass == "" {
-		body.WorkerClass = "any"
+	name := ident.Name
+	class := body.WorkerClass
+	if class == "" {
+		class = ident.WorkerClass
 	}
-	wk, err := s.workers.Upsert(r.Context(), body.Name, body.WorkerClass, body.Capabilities)
+	if class == "" {
+		class = "any"
+	}
+	wk, err := s.workers.Upsert(r.Context(), name, class, body.Capabilities)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "heartbeat failed")
 		return
@@ -65,17 +122,18 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	if workerClass == "" {
 		workerClass = "any"
 	}
-	workerID := r.Header.Get("X-Worker-Id")
-	if workerID == "" {
-		// Require a stable per-worker identity: claimed_by must uniquely name the
-		// worker so ownership can be enforced on later posts. Refuse to synthesize
-		// a shared "worker-<class>" identity.
-		writeError(w, http.StatusBadRequest, "X-Worker-Id header is required")
+	// Identity is derived from the per-worker token (RequireWorkerToken), never
+	// from a client-set header: claimed_by uses this resolved name so ownership
+	// can be enforced on later posts.
+	wk := auth.WorkerFromContext(r.Context())
+	if wk == nil {
+		writeError(w, http.StatusUnauthorized, "worker not authenticated")
 		return
 	}
+	workerID := wk.Name
 
 	// A disabled worker is not allowed to take new jobs.
-	if wk, err := s.workers.GetByName(r.Context(), workerID); err == nil && !wk.Enabled {
+	if !wk.Enabled {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -108,11 +166,15 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// workerID returns the identity the worker presents on /internal calls. It
-// matches the X-Worker-Id the worker used at claim time, which is stored in the
-// job's claimed_by column and enforced by bindWorker.
+// workerID returns the identity the worker presents on /internal calls. It is
+// derived from the per-worker token by RequireWorkerToken (not a client header),
+// and matches the name stored in the job's claimed_by column at claim time,
+// which bindWorker enforces.
 func workerID(r *http.Request) string {
-	return r.Header.Get("X-Worker-Id")
+	if wk := auth.WorkerFromContext(r.Context()); wk != nil {
+		return wk.Name
+	}
+	return ""
 }
 
 // bindWorker verifies that the job in the URL exists and is genuinely owned by
@@ -121,7 +183,7 @@ func workerID(r *http.Request) string {
 // response and returns ok=false.
 //
 // Rules (item 12 — prevent double-processing after a stale requeue):
-//   - the worker must present X-Worker-Id;
+//   - the worker must be authenticated (per-worker token → resolved identity);
 //   - the job must be in an active state (running/claimed) — a requeued/finished
 //     job returns 409 so the worker aborts;
 //   - claimed_by must equal the caller's worker id. A nil claimed_by on a
@@ -136,7 +198,7 @@ func (s *Server) bindWorker(w http.ResponseWriter, r *http.Request, id string) (
 	}
 	wid := workerID(r)
 	if wid == "" {
-		writeError(w, http.StatusBadRequest, "X-Worker-Id header is required")
+		writeError(w, http.StatusUnauthorized, "worker not authenticated")
 		return nil, false
 	}
 	// The job must still be active; a requeued or finished job is no longer this

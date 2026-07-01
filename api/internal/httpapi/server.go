@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type Server struct {
 	store    storage.Storage
 	hub      *events.Hub
 	cleaner  *VideoCleaner // set post-construction; nil until StartVideoCleaner
+	metrics  *metrics
 
 	sseMu     sync.Mutex
 	sseByUser map[string]int // active SSE streams per user id
@@ -58,8 +60,14 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, repo *users.Repo, jobRepo
 	return &Server{
 		cfg: cfg, pool: pool, users: repo, jobs: jobRepo, settings: settingsRepo, workers: workerRepo,
 		audit: auditRepo, sessions: sessions, authn: authn, oidc: oidc, store: store, hub: events.NewHub(),
-		sseByUser: map[string]int{},
+		sseByUser: map[string]int{}, metrics: newMetrics(),
 	}
+}
+
+// StartMetrics begins the periodic refresh of the job-count and workers-online
+// gauges. Safe to call once after construction; the goroutine stops on ctx.
+func (s *Server) StartMetrics(ctx context.Context, logf func(string, ...any)) {
+	s.metrics.startRefresher(ctx, s.pool, 90*time.Second, logf)
 }
 
 // Router builds the chi router with all routes mounted.
@@ -69,6 +77,7 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(jsonLogger)
 	r.Use(middleware.Recoverer)
+	r.Use(s.metrics.middleware)
 
 	if len(s.cfg.CORSOrigins) > 0 {
 		r.Use(cors.Handler(cors.Options{
@@ -82,6 +91,10 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleReady)
+
+	// Prometheus metrics, gated behind the bootstrap internal token so scrape
+	// access is a shared secret rather than world-readable.
+	r.With(auth.RequireInternal(s.cfg.InternalAPIToken)).Handle("/metrics", s.metrics.handler())
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
@@ -150,16 +163,24 @@ func (s *Server) Router() http.Handler {
 			r.Delete("/admin/workers/{id}", s.handleAdminDeleteWorker)
 		})
 
-		// Worker protocol — guarded by the shared internal bearer token.
+		// Worker protocol. Enrollment is guarded by the shared bootstrap token and
+		// issues a per-worker token; every other route is guarded by that
+		// per-worker token, which also resolves the worker's identity (the shared
+		// bootstrap token is NO LONGER accepted on the job routes).
 		r.Route("/internal", func(r chi.Router) {
-			r.Use(auth.RequireInternal(s.cfg.InternalAPIToken))
-			r.Post("/workers/heartbeat", s.handleWorkerHeartbeat)
-			r.Post("/jobs/claim", s.handleClaim)
-			r.Post("/jobs/{id}/progress", s.handleProgress)
-			r.Post("/jobs/{id}/heartbeat", s.handleHeartbeat)
-			r.Post("/jobs/{id}/log", s.handleInternalLog)
-			r.Put("/jobs/{id}/result", s.handleResult)
-			r.Post("/jobs/{id}/complete", s.handleComplete)
+			r.With(auth.RequireInternal(s.cfg.InternalAPIToken)).
+				Post("/workers/enroll", s.handleWorkerEnroll)
+
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequireWorkerToken(s.workers))
+				r.Post("/workers/heartbeat", s.handleWorkerHeartbeat)
+				r.Post("/jobs/claim", s.handleClaim)
+				r.Post("/jobs/{id}/progress", s.handleProgress)
+				r.Post("/jobs/{id}/heartbeat", s.handleHeartbeat)
+				r.Post("/jobs/{id}/log", s.handleInternalLog)
+				r.Put("/jobs/{id}/result", s.handleResult)
+				r.Post("/jobs/{id}/complete", s.handleComplete)
+			})
 		})
 
 		// Local-storage signed download URLs resolve here.

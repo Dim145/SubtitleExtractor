@@ -43,6 +43,14 @@ def main() -> None:
     _start_health_pinger()
     log.info("worker started: name=%s class=%s api=%s", cfg.worker_name, cfg.worker_class, cfg.api_base_url)
 
+    # Enroll up front so the first heartbeat already carries a per-worker token.
+    # A failure here isn't fatal — the request layer re-enrolls lazily/on 401 —
+    # but enrolling now surfaces a bad bootstrap token immediately.
+    try:
+        client.enroll()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("initial enrollment failed (will retry lazily): %s", exc)
+
     was_disabled = False
     last_active = time.monotonic()
     try:

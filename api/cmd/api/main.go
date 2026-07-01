@@ -84,6 +84,9 @@ func run() error {
 	cleanupRepo := cleanup.NewRepo(pool)
 	srv.SetVideoCleaner(httpapi.StartVideoCleaner(ctx, jobRepo, settingsRepo, cleanupRepo, store, log.Printf))
 
+	// Refresh Prometheus job/worker gauges on a background ticker.
+	srv.StartMetrics(ctx, log.Printf)
+
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           srv.Router(),
