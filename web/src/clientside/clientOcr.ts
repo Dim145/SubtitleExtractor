@@ -18,10 +18,16 @@ ortEnv.wasm.wasmPaths = new URL("/ort/", location.href).href;
 // working offline + privacy-preserving, and — combined with the COOP/COEP
 // cross-origin isolation the app sets — lets onnxruntime-web use its multi-
 // threaded WASM backend (SharedArrayBuffer) at full speed.
+// Detection: PP-OCRv6 small (compact, fast) — produces the text boxes.
+// Recognition: latin PP-OCRv5 mobile — the SAME recognizer family the server
+// uses. The v6 compact multilingual recognizer drops inter-word spaces on tight
+// French text ("n'allez pas trop" -> "n'allezpastrop") and mangles accents; the
+// latin v5 rec preserves spaces + accents (é à ç œ ...). Det/rec versions are
+// independent, so mixing v6 det with v5 latin rec is fine (dict must match rec).
 const MODEL = {
   detection: new URL("/models/PP-OCRv6_small_det.ort", location.href).href,
-  recognition: new URL("/models/PP-OCRv6_small_rec.ort", location.href).href,
-  charactersDictionary: new URL("/models/ppocrv6_dict.txt", location.href).href,
+  recognition: new URL("/models/latin_PP-OCRv5_mobile_rec_infer.onnx", location.href).href,
+  charactersDictionary: new URL("/models/ppocrv5_latin_dict.txt", location.href).href,
 };
 import type { Cue } from "../editor/subtitles";
 import { FrameDecoder } from "../editor/decodeFrame";
@@ -237,16 +243,42 @@ async function autoDetectZones(
   return zones.length ? zones : null;
 }
 
-// Drop obvious OCR noise (single stray glyphs like "R", punctuation-only reads)
-// so a bad transient frame can't seed a cue.
+// Drop obvious OCR noise (single stray glyphs, punctuation-only reads) so a bad
+// transient frame can't seed a cue. Exact port of the server's
+// dedup.py:is_junk so browser cues match worker output (and valid short
+// interjections like "Ahh!", "Hmm?", "Shota." SURVIVE — they have letters and
+// length > 1):
+//   * after stripping whitespace: empty → junk
+//   * length <= 1 → junk (single-glyph misfire)
+//   * pure non-word/digit/underscore, 1-3 chars (`^[\W\d_]{1,3}$`) → junk
+//   * no letters at all AND length <= 3 → junk (e.g. "11", "0:0")
+const JUNK_RE = /^[\W\d_]{1,3}$/u;
+const HAS_LETTER = /[^\W\d_]/u;
 function isJunk(s: string): boolean {
-  const c = s.replace(/\s/g, "");
-  if (c.length < 2) return true;
-  if (!/[\p{L}\p{N}]/u.test(c)) return true;
-  // Short tokens with no vowel are almost always OCR noise on transition frames
-  // (e.g. "YXK", "Δ"); real subtitle text has vowels.
-  if (c.length <= 3 && !/[aeiouyàâäéèêëïîôöùûüœ0-9]/iu.test(c)) return true;
-  return false;
+  const t = s.replace(/\s+/gu, "");
+  if (!t) return true;
+  if (t.length <= 1) return true;
+  if (JUNK_RE.test(t)) return true;
+  return !HAS_LETTER.test(t) && t.length <= 3;
+}
+
+// Fraction of alphabetic characters that are NOT Latin script. Lets a Latin-
+// content job drop foreign-script hallucinations/misreads (e.g. a stray CJK
+// glyph in "N心W 7"), which are never real subtitles here. Port of the server's
+// dedup.py:non_latin_ratio. A char counts as Latin when it lies in the Basic
+// Latin letters, Latin-1 Supplement, or the Latin Extended ranges (covers
+// accents é à ç, ligatures œ, etc.); CJK/Greek/Cyrillic/other count as non-Latin.
+const LATIN_LETTER = /[A-Za-zÀ-ɏḀ-ỿ]/;
+const ANY_LETTER = /\p{L}/u;
+function nonLatinRatio(text: string): number {
+  let letters = 0;
+  let nonLatin = 0;
+  for (const ch of text) {
+    if (!ANY_LETTER.test(ch)) continue;
+    letters++;
+    if (!LATIN_LETTER.test(ch)) nonLatin++;
+  }
+  return letters === 0 ? 0 : nonLatin / letters;
 }
 
 function levRatio(a: string, b: string): number {
@@ -277,10 +309,16 @@ interface Sample {
 // Group consecutive frames showing (roughly) the same text into one cue and
 // majority-vote the text across the run, so a single misread frame can't define
 // the cue. Up to 2 blank frames (OCR drops / fades) are bridged within a cue.
+// Server-parity post-merge filter constants (worker/subextractor: dedup.py
+// merge_into_cues defaults + pipeline.py non_latin_ratio gate).
+const MIN_FRAMES = 2; // a cue must be seen in >= this many sampled frames
+const MIN_SUBTITLE_DURATION = 0.4; // seconds
+const MAX_NON_LATIN_RATIO = 0.4; // Latin content: drop cues >40% foreign-script letters
+
 function mergeCues(samples: Sample[], frameInterval: number): Cue[] {
   const cues: Cue[] = [];
   let counter = 0;
-  type Group = { start: number; end: number; an: number; votes: Map<string, number>; blanks: number };
+  type Group = { start: number; end: number; an: number; votes: Map<string, number>; blanks: number; frames: number };
   let group: Group | null = null;
   const winner = (votes: Map<string, number>): string => {
     let best = "", bc = 0;
@@ -289,9 +327,26 @@ function mergeCues(samples: Sample[], frameInterval: number): Cue[] {
   };
   const flush = () => {
     if (!group) return;
-    const text = winner(group.votes);
-    if (text) cues.push({ id: `c-${counter++}`, start: group.start, end: group.end + frameInterval, text, an: group.an });
+    const g = group;
     group = null;
+    const text = winner(g.votes);
+    if (!text) return;
+    const end = g.end + frameInterval;
+    // Server-parity post-filters (dedup.py:merge_into_cues + is_junk +
+    // pipeline.py non_latin_ratio). Drop transient/noise cues so the browser
+    // output matches the worker:
+    //   * persistence: seen in < MIN_FRAMES sampled frames;
+    //   * duration: shorter than MIN_SUBTITLE_DURATION;
+    //   * junk: empty / single-glyph / pure short punctuation-digits;
+    //   * foreign-script: > MAX_NON_LATIN_RATIO of its letters are non-Latin.
+    // Valid short interjections ("Ahh!", "Hmm?", "Shota.") survive: they clear
+    // is_junk (length > 1, contain letters) and, if seen across >= MIN_FRAMES
+    // frames for >= MIN_SUBTITLE_DURATION, pass the persistence/duration gates.
+    if (g.frames < MIN_FRAMES) return;
+    if (end - g.start < MIN_SUBTITLE_DURATION) return;
+    if (isJunk(text)) return;
+    if (nonLatinRatio(text) > MAX_NON_LATIN_RATIO) return;
+    cues.push({ id: `c-${counter++}`, start: g.start, end, text, an: g.an });
   };
   for (const s of samples) {
     const t = s.text.trim();
@@ -300,10 +355,11 @@ function mergeCues(samples: Sample[], frameInterval: number): Cue[] {
       group.votes.set(t, (group.votes.get(t) ?? 0) + 1);
       group.end = s.t;
       group.blanks = 0;
+      group.frames++;
       group.an = s.an;
     } else {
       flush();
-      group = { start: s.t, end: s.t, an: s.an, votes: new Map([[t, 1]]), blanks: 0 };
+      group = { start: s.t, end: s.t, an: s.an, votes: new Map([[t, 1]]), blanks: 0, frames: 1 };
     }
   }
   flush();
@@ -367,7 +423,15 @@ export async function extractInBrowser(
   let rects: Rect[] = [];
   let samples: Sample[][] = [];
   let W = 0, H = 0;
+  let recScale = 1;
   const work = document.createElement("canvas");
+  // Recognition-only upscale canvas. Small sources (e.g. 960x536) render tiny
+  // glyphs; the recognizer then has to UPSAMPLE a sub-48px text box, losing fine
+  // marks (apostrophes -> i/j) and tight word gaps. Upscaling the crop with
+  // high-quality smoothing feeds the rec a >=48px source to downsample from
+  // instead (server parity: the worker adaptively upscales small crops). The
+  // detector gate stays on the native `work` crop to keep it cheap.
+  const recWork = document.createElement("canvas");
 
   // Sequential decode → true per-time frames (not keyframe snaps), so OCR sees
   // the frames that actually carry subtitles.
@@ -378,6 +442,10 @@ export async function extractInBrowser(
       H = bitmap.height;
       rects = (zones && zones.length ? zones : defaultZone).map((z) => pxRect(z, W, H));
       samples = rects.map(() => []);
+      // Upscale the recognition crop for small sources so text boxes reach a
+      // legible resolution (~720p-equiv), capped at 3x. Large sources (>=720h)
+      // are already crisp and stay at 1x, so they never regress.
+      recScale = Math.max(1, Math.min(3, Math.ceil(720 / H)));
     }
     for (let zi = 0; zi < rects.length; zi++) {
       const r = rects[zi];
@@ -394,7 +462,22 @@ export async function extractInBrowser(
         ? await detectHasText(detector.service, work)
         : maskDensity(textMask(work)) > 0.012;
       if (present) {
-        const res = await ocr.recognize(work, { flatten: true });
+        // strategy:"per-line" merges same-line word boxes and recognizes each
+        // line in ONE pass, so inter-word SPACES are preserved (the lib's runtime
+        // default is "per-box", which recognizes each box separately and
+        // concatenates without spaces — see ppu-paddle-ocr constants.js). Server
+        // parity: the worker OCRs whole lines, not word boxes.
+        let recInput: HTMLCanvasElement = work;
+        if (recScale > 1) {
+          recWork.width = r.w * recScale;
+          recWork.height = r.h * recScale;
+          const rctx = recWork.getContext("2d")!;
+          rctx.imageSmoothingEnabled = true;
+          rctx.imageSmoothingQuality = "high";
+          rctx.drawImage(work, 0, 0, recWork.width, recWork.height);
+          recInput = recWork;
+        }
+        const res = await ocr.recognize(recInput, { flatten: true, strategy: "per-line" });
         const raw = (res?.text ?? "").trim();
         text = isJunk(raw) ? "" : raw;
       }
