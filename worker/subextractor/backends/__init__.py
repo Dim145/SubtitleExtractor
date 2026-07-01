@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import threading
 from typing import Any
 
 from .base import OCRBackend, OCRLine
@@ -12,6 +13,9 @@ __all__ = ["OCRBackend", "OCRLine", "get_backend", "is_loaded", "unload_all"]
 # PaddleOCR-VL MLX model, ~15s to load) are initialised once and reused, while a
 # config change (different model/lang/gpu) builds a fresh instance.
 _cache: dict[tuple, OCRBackend] = {}
+# Guards the check-then-set on `_cache` so two concurrent callers can't each
+# load the (expensive) model for the same key. Cheap when uncontended.
+_cache_lock = threading.Lock()
 
 
 def get_backend(name: str, **opts: Any) -> OCRBackend:
@@ -36,6 +40,16 @@ def get_backend(name: str, **opts: Any) -> OCRBackend:
     if cached is not None:
         return cached
 
+    # Serialize the load so concurrent callers for the same key don't each build
+    # the model. Re-check inside the lock (another thread may have just built it).
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is not None:
+            return cached
+        return _build_backend(name, key, opts)
+
+
+def _build_backend(name: str, key: tuple, opts: dict) -> OCRBackend:
     if name == "rapidocr":
         from .rapidocr import RapidOCRBackend
 

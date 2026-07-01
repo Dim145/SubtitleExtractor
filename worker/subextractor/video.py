@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -16,6 +17,31 @@ import cv2
 import numpy as np
 
 log = logging.getLogger("subextractor")
+
+# Whitelists for admin/DB-supplied decode options. Anything outside these is
+# ignored and the safe default is used, so a bad config value can never be
+# injected into the ffmpeg argv.
+_KNOWN_DECODERS = frozenset({"opencv", "ffmpeg"})
+_KNOWN_HWACCELS = frozenset({
+    "", "none", "cuda", "videotoolbox", "vaapi", "qsv", "d3d11va", "dxva2",
+    "vdpau", "opencl", "vulkan", "drm",
+})
+
+
+def _valid_decoder(decoder: str | None, default: str = "opencv") -> str:
+    d = (decoder or default).lower()
+    if d not in _KNOWN_DECODERS:
+        log.warning("ignoring unknown decoder %r; using %r", decoder, default)
+        return default
+    return d
+
+
+def _valid_hwaccel(hwaccel: str | None, default: str = "cuda") -> str:
+    h = (hwaccel or default).lower()
+    if h not in _KNOWN_HWACCELS:
+        log.warning("ignoring unknown hwaccel %r; using %r", hwaccel, default)
+        h = default
+    return "" if h == "none" else h
 
 
 @dataclass
@@ -136,8 +162,10 @@ def parse_crop(crop: str | None, width: int, height: int) -> tuple[int, int, int
     if crop:
         try:
             x, y, w, h = (int(v) for v in crop.split(":"))
-            x = max(0, min(x, width))
-            y = max(0, min(y, height))
+            # Clamp the origin to width-1/height-1 (consistent with _resolve_zones)
+            # so at least one column/row of pixels always remains for the crop.
+            x = max(0, min(x, width - 1))
+            y = max(0, min(y, height - 1))
             w = max(1, min(w, width - x))
             h = max(1, min(h, height - y))
             return x, y, w, h
@@ -202,6 +230,7 @@ def sample_frames_ffmpeg(path: str, sample_fps: float, hwaccel: str = "cuda") ->
     timeline — matching players and the reference SRTs (a `-c copy` trim leaves a
     non-zero start_time; subtracting it would make subtitles appear too early).
     """
+    hwaccel = _valid_hwaccel(hwaccel, default="cuda")
     info = probe(path)
     w, h = info.width, info.height
     if w <= 0 or h <= 0:
@@ -213,34 +242,57 @@ def sample_frames_ffmpeg(path: str, sample_fps: float, hwaccel: str = "cuda") ->
         cmd += ["-hwaccel", hwaccel]
     cmd += [
         "-i", path,
-        "-vf", f"setpts=PTS-STARTPTS,fps={sample_fps}",
+        # Force a known raw output geometry: `scale` pins the frame to the probed
+        # dims (so a rotation/SAR mismatch can't make the raw stream a different
+        # size than we reshape to) and `format=bgr24` locks the pixel layout.
+        "-vf", f"setpts=PTS-STARTPTS,fps={sample_fps},scale={w}:{h},format=bgr24",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    # Drain stderr on a background thread so a chatty decoder can't fill the 64K
+    # stderr pipe and deadlock the stdout frame pump. Cap what we retain.
+    err_chunks: list[bytes] = []
+
+    def _drain_stderr() -> None:
+        try:
+            assert proc.stderr is not None
+            while True:
+                chunk = proc.stderr.read(4096)
+                if not chunk:
+                    break
+                if len(err_chunks) < 8:  # keep at most ~32K for diagnostics
+                    err_chunks.append(chunk)
+        except Exception:  # noqa: BLE001
+            pass
+
+    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    err_thread.start()
+
     frame_size = w * h * 3
     idx = 0
-    err = ""
     try:
         assert proc.stdout is not None
         while True:
             raw = proc.stdout.read(frame_size)
             if len(raw) < frame_size:
                 break
+            # The scale filter guarantees frame_size, but guard defensively so a
+            # truncated/misaligned read raises cleanly instead of reshape-crashing.
+            if len(raw) % frame_size != 0:
+                raise RuntimeError(
+                    f"ffmpeg raw frame size mismatch (got {len(raw)}, expected {frame_size})"
+                )
             frame = np.frombuffer(raw, np.uint8).reshape(h, w, 3)
             yield SampledFrame(timestamp=start + idx * interval, image=frame, width=w, height=h, interval=interval)
             idx += 1
     finally:
         if proc.poll() is None:
             proc.kill()
-        # With `-loglevel error` stderr is near-empty during a healthy decode, so
-        # reading it only at the end can't deadlock the stdout pump above.
-        try:
-            err = proc.stderr.read().decode("utf-8", "replace")[:300] if proc.stderr else ""
-        except Exception:  # noqa: BLE001
-            err = ""
         proc.wait()
+        err_thread.join(timeout=2.0)
     if idx == 0:
+        err = b"".join(err_chunks).decode("utf-8", "replace")[:300]
         raise RuntimeError(f"ffmpeg produced no frames (hwaccel={hwaccel}): {err}")
 
 
@@ -249,11 +301,9 @@ def sample_frames_auto(
 ) -> Iterator[SampledFrame]:
     """Pick the decoder (opencv | ffmpeg). ffmpeg uses hardware decode (NVDEC /
     VideoToolbox); on failure it falls back to OpenCV. Args override env defaults."""
-    decoder = (decoder or os.environ.get("WORKER_DECODER", "opencv")).lower()
+    decoder = _valid_decoder(decoder or os.environ.get("WORKER_DECODER", "opencv"))
     if decoder == "ffmpeg":
-        hwaccel = (hwaccel or os.environ.get("WORKER_HWACCEL", "cuda")).lower()
-        if hwaccel == "none":
-            hwaccel = ""
+        hwaccel = _valid_hwaccel(hwaccel or os.environ.get("WORKER_HWACCEL", "cuda"))
         emitted = 0
         try:
             for sf in sample_frames_ffmpeg(path, sample_fps, hwaccel):

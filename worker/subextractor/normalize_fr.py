@@ -33,6 +33,9 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 _WORDLIST_URL = "https://cdn.jsdelivr.net/npm/an-array-of-french-words/index.json"
+# The real list has ~336k entries; anything far below this is a truncated /
+# corrupt cache (e.g. from a mid-write kill), so we reject it.
+_MIN_WORDLIST_LEN = 100_000
 
 VOWELS = frozenset("aeiouyàâäéèêëîïôöùûüh")
 # Productive elisions: je/de/le/la/que elide before ANY vowel-initial word
@@ -85,10 +88,26 @@ def get_french_words() -> frozenset[str] | None:
             with urllib.request.urlopen(_WORDLIST_URL, timeout=30) as r:
                 data = r.read()
             arr = json.loads(data)
-            path.write_text("\n".join(arr), encoding="utf-8")
+            if not isinstance(arr, list) or len(arr) < _MIN_WORDLIST_LEN:
+                raise ValueError(f"wordlist too short ({len(arr) if isinstance(arr, list) else 'n/a'} entries)")
+            # Atomic write: stage to a temp file in the same dir, then os.replace
+            # so a mid-write kill can never leave a truncated cache behind.
+            tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+            tmp.write_text("\n".join(arr), encoding="utf-8")
+            os.replace(tmp, path)
         raw = path.read_text(encoding="utf-8", errors="replace")
         arr = json.loads(raw) if raw.lstrip().startswith("[") else raw.splitlines()
-        _words = frozenset(w.strip().lower() for w in arr if w.strip())
+        words = frozenset(w.strip().lower() for w in arr if w.strip())
+        # Guard against a truncated cache from an earlier interrupted write: too
+        # few words means the file is corrupt — remove it so a later process can
+        # re-download, and skip normalization now rather than trusting it.
+        if len(words) < _MIN_WORDLIST_LEN and not override:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise ValueError(f"cached wordlist too short ({len(words)} words); treating as corrupt")
+        _words = words
         log.info("normalize_fr: loaded %d French words", len(_words))
     except Exception as e:  # offline / disk / parse — degrade gracefully
         log.warning("normalize_fr: no French wordlist (%s); normalization disabled", e)

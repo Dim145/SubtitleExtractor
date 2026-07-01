@@ -142,14 +142,35 @@ def is_junk(text: str) -> bool:
     return _HAS_LETTER.search(t) is None and len(t) <= 3
 
 
+# Unicode general categories that count as a "letter" for script classification.
+_LETTER_CATS = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo"})
+
+
+def _is_latin_letter(ch: str) -> bool:
+    """True if `ch` is a Latin-script letter, tolerant of accented/ligature/
+    extended-Latin codepoints. Uses the Unicode name's script token rather than a
+    raw prefix so e.g. 'LATIN SMALL LIGATURE OE' still classifies as Latin."""
+    name = unicodedata.name(ch, "")
+    if not name:
+        return False
+    return name.startswith("LATIN")
+
+
 def non_latin_ratio(text: str) -> float:
-    """Fraction of alphabetic characters that are NOT Latin script. Lets a Latin
+    """Fraction of *letter* characters that are NOT Latin script. Lets a Latin
     job drop foreign-script hallucinations (e.g. a VLM emitting CJK like
-    '2024年世界经济论坛'), which are never real subtitles in that context."""
-    letters = [ch for ch in text if ch.isalpha()]
+    '2024年世界经济论坛'), which are never real subtitles in that context.
+
+    Combining marks (category ``Mn``, e.g. a decomposed accent) are treated as
+    neutral and ignored, so a valid Latin cue written with combining diacritics
+    (or unusual codepoints) is not misclassified as foreign and dropped."""
+    letters = [
+        ch for ch in text
+        if unicodedata.category(ch) in _LETTER_CATS
+    ]
     if not letters:
         return 0.0
-    nonlatin = sum(1 for ch in letters if not unicodedata.name(ch, "").startswith("LATIN"))
+    nonlatin = sum(1 for ch in letters if not _is_latin_letter(ch))
     return nonlatin / len(letters)
 
 
@@ -293,7 +314,7 @@ def merge_into_cues(
     samples: list[tuple[float, str, int, float]],
     frame_interval: float,
     sim_threshold: float = 80.0,
-    min_gap: float = 0.4,
+    min_gap: float = 1.0,
     min_duration: float = 0.4,
     min_frames: int = 2,
     drop_junk: bool = True,

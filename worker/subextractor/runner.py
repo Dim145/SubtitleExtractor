@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 
 from .config import Config
 
@@ -20,6 +21,16 @@ log = logging.getLogger("subextractor")
 
 # spawn → a clean child with no inherited fds/threads/HTTP pools from the parent.
 _ctx = mp.get_context("spawn")
+
+
+def _max_job_seconds() -> float:
+    """Wall-clock budget for a single job. A wedged native lib (paddle/onnx/
+    ffmpeg) can hang the child while still looking alive; the watchdog kills it
+    past this budget so the worker doesn't silently stall. 0/negative disables."""
+    try:
+        return float(os.environ.get("WORKER_MAX_JOB_SECONDS", "3600"))
+    except ValueError:
+        return 3600.0
 
 
 def _child_loop(cfg: Config, conn) -> None:
@@ -82,8 +93,19 @@ class JobRunner:
         """Run one job in the child and block for the result. Returns 'done' or
         'canceled'; raises RuntimeError if the job failed or the child died."""
         self._ensure()
+        budget = _max_job_seconds()
         try:
             self._conn.send((job, input_url, wcfg, sub_rules))
+            # Watchdog: block on recv() but wake up to enforce a max-duration
+            # budget so a wedged native lib can't hang the worker indefinitely.
+            if budget > 0:
+                if not self._conn.poll(budget):
+                    log.error(
+                        "OCR job %s exceeded %.0fs budget; killing child",
+                        job.get("id"), budget,
+                    )
+                    self.shutdown()  # reap the wedged child; caller fails the job
+                    raise RuntimeError(f"OCR job exceeded {budget:.0f}s budget (killed)")
             status, payload = self._conn.recv()
         except (EOFError, BrokenPipeError, OSError) as exc:
             self.shutdown()  # child crashed (e.g. native fault) — reap it

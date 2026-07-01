@@ -47,6 +47,28 @@ DEFAULT_FPS = 4.0
 DEFAULT_MIN_CONFIDENCE = 0.4
 DEFAULT_BACKEND = "rapidocr"
 
+# Single source of truth for merge/OCR-loop knob defaults so `resolve_config`
+# and the `extract_cues` / `merge_into_cues` fallbacks cannot drift apart.
+DEFAULT_UPSCALE = 2.0
+DEFAULT_TARGET_TEXT_HEIGHT = 40.0
+DEFAULT_MAX_SCALE = 4.0
+DEFAULT_TEXT_PRESENCE_THRESHOLD = 0.008
+DEFAULT_CHANGE_THRESHOLD = 0.01
+DEFAULT_PRESENCE_CHANGE_THRESHOLD = 0.15
+DEFAULT_BEST_FRAME = False
+DEFAULT_BEST_FRAME_MARGIN = 0.15
+DEFAULT_MAX_OCR_PER_GROUP = 2
+DEFAULT_MIN_FRAMES = 2
+DEFAULT_MIN_SUBTITLE_DURATION = 0.4
+DEFAULT_MIN_GAP = 1.0
+DEFAULT_SIM_THRESHOLD = 80.0
+DEFAULT_DROP_JUNK = True
+DEFAULT_CHAR_VOTING = True
+# Permanent-overlay filter: a cue must be both long (absolute) AND span most of
+# the video to be treated as a station-ID/watermark overlay rather than a cue.
+DEFAULT_PERMANENT_MIN_SECONDS = 12.0
+DEFAULT_PERMANENT_MIN_FRACTION = 0.8
+
 # Map a job language to a RapidOCR recognition model family. Latin covers
 # fr/en/es/de/it/pt… (the project's primary target). Unknown → latin.
 _REC_LANG_BY_LANGUAGE = {
@@ -119,9 +141,9 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         # doesn't silently drop lines we'd otherwise keep.
         "text_score": float(_pick(params, wcfg, "text_score", min_conf)),
         # Pre-OCR scaling: adaptive toward a target glyph height, capped.
-        "upscale": float(_pick(params, wcfg, "upscale", 2.0)),
-        "target_text_height": float(_pick(params, wcfg, "target_text_height", 40.0)),
-        "max_scale": float(_pick(params, wcfg, "max_scale", 4.0)),
+        "upscale": float(_pick(params, wcfg, "upscale", DEFAULT_UPSCALE)),
+        "target_text_height": float(_pick(params, wcfg, "target_text_height", DEFAULT_TARGET_TEXT_HEIGHT)),
+        "max_scale": float(_pick(params, wcfg, "max_scale", DEFAULT_MAX_SCALE)),
         # Gating + merge.
         # DBNet detector as the presence gate (recall win over edge density: it
         # catches faint / short cues the edge heuristic misses). When off, fall
@@ -131,21 +153,23 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         # upscales the short side and explodes the wide side to 400-600ms).
         "detector_limit_type": _pick(params, wcfg, "detector_limit_type", "max"),
         "detector_limit_side_len": int(_pick(params, wcfg, "detector_limit_side_len", 736)),
-        "text_presence_threshold": float(_pick(params, wcfg, "text_presence_threshold", 0.008)),
-        "change_threshold": float(_pick(params, wcfg, "change_threshold", 0.01)),
+        "text_presence_threshold": float(_pick(params, wcfg, "text_presence_threshold", DEFAULT_TEXT_PRESENCE_THRESHOLD)),
+        "change_threshold": float(_pick(params, wcfg, "change_threshold", DEFAULT_CHANGE_THRESHOLD)),
         # Also re-OCR when text-edge density (presence) jumps by this relative
         # amount — the bright-pixel mask alone misses a short word appearing over
         # a busy/bright background (it barely moves the mask). Catches short cues.
-        "presence_change_threshold": float(_pick(params, wcfg, "presence_change_threshold", 0.15)),
-        "min_frames": int(_pick(params, wcfg, "min_frames", 2)),
-        "min_subtitle_duration": float(_pick(params, wcfg, "min_subtitle_duration", 0.4)),
+        "presence_change_threshold": float(_pick(params, wcfg, "presence_change_threshold", DEFAULT_PRESENCE_CHANGE_THRESHOLD)),
+        "min_frames": int(_pick(params, wcfg, "min_frames", DEFAULT_MIN_FRAMES)),
+        "min_subtitle_duration": float(_pick(params, wcfg, "min_subtitle_duration", DEFAULT_MIN_SUBTITLE_DURATION)),
         # Max gap to bridge two near-identical consecutive cues into one. A single
         # subtitle often splits across a brief (~0.5s) detection dropout; 0.4 was
         # too tight and left duplicates. sim_threshold still guards against merging
         # genuinely different lines.
-        "min_gap": float(_pick(params, wcfg, "min_gap", 1.0)),
-        "drop_junk": bool(_pick(params, wcfg, "drop_junk", True)),
-        "char_voting": bool(_pick(params, wcfg, "char_voting", True)),
+        "min_gap": float(_pick(params, wcfg, "min_gap", DEFAULT_MIN_GAP)),
+        # Fuzzy-match floor (0..100) for grouping/bridging near-identical cue text.
+        "sim_threshold": float(_pick(params, wcfg, "sim_threshold", DEFAULT_SIM_THRESHOLD)),
+        "drop_junk": bool(_pick(params, wcfg, "drop_junk", DEFAULT_DROP_JUNK)),
+        "char_voting": bool(_pick(params, wcfg, "char_voting", DEFAULT_CHAR_VOTING)),
         # French-only deterministic post-OCR normalizer (restore elision
         # apostrophes, split run-together words). Wordlist-validated → no
         # regressions; applied only to French jobs. See normalize_fr.py.
@@ -159,9 +183,9 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         # Off by default: it roughly triples OCR cost and its accuracy benefit is
         # unproven on this content — enable + measure with the eval harness before
         # turning it on for real.
-        "best_frame": bool(_pick(params, wcfg, "best_frame", False)),
-        "best_frame_margin": float(_pick(params, wcfg, "best_frame_margin", 0.15)),
-        "max_ocr_per_group": int(_pick(params, wcfg, "max_ocr_per_group", 2)),
+        "best_frame": bool(_pick(params, wcfg, "best_frame", DEFAULT_BEST_FRAME)),
+        "best_frame_margin": float(_pick(params, wcfg, "best_frame_margin", DEFAULT_BEST_FRAME_MARGIN)),
+        "max_ocr_per_group": int(_pick(params, wcfg, "max_ocr_per_group", DEFAULT_MAX_OCR_PER_GROUP)),
         # Other backends.
         "ppocr_lang": _pick(params, wcfg, "ppocr_lang", None),
         "ppocr_use_gpu": _pick(params, wcfg, "ppocr_use_gpu", None),
@@ -367,15 +391,15 @@ def extract_cues(
     raise to abort (e.g. cancellation). Returns (cues, video_info)."""
     sample_fps = float(cfg.get("fps", DEFAULT_FPS))
     min_conf = float(cfg.get("min_confidence", DEFAULT_MIN_CONFIDENCE))
-    upscale = float(cfg.get("upscale", 2.0))
-    target_h = float(cfg.get("target_text_height", 40.0))
-    max_scale = float(cfg.get("max_scale", 4.0))
-    presence_thr = float(cfg.get("text_presence_threshold", 0.008))
-    change_thr = float(cfg.get("change_threshold", 0.01))
-    best_frame = bool(cfg.get("best_frame", True))
-    best_margin = float(cfg.get("best_frame_margin", 0.15))
-    max_ocr_grp = int(cfg.get("max_ocr_per_group", 3))
-    pres_change_thr = float(cfg.get("presence_change_threshold", 0.15))
+    upscale = float(cfg.get("upscale", DEFAULT_UPSCALE))
+    target_h = float(cfg.get("target_text_height", DEFAULT_TARGET_TEXT_HEIGHT))
+    max_scale = float(cfg.get("max_scale", DEFAULT_MAX_SCALE))
+    presence_thr = float(cfg.get("text_presence_threshold", DEFAULT_TEXT_PRESENCE_THRESHOLD))
+    change_thr = float(cfg.get("change_threshold", DEFAULT_CHANGE_THRESHOLD))
+    best_frame = bool(cfg.get("best_frame", DEFAULT_BEST_FRAME))
+    best_margin = float(cfg.get("best_frame_margin", DEFAULT_BEST_FRAME_MARGIN))
+    max_ocr_grp = int(cfg.get("max_ocr_per_group", DEFAULT_MAX_OCR_PER_GROUP))
+    pres_change_thr = float(cfg.get("presence_change_threshold", DEFAULT_PRESENCE_CHANGE_THRESHOLD))
 
     # Presence gate: a DBNet detector (recall win) or the edge-density heuristic.
     use_det_gate = bool(cfg.get("use_detector_gate", True))
@@ -419,8 +443,12 @@ def extract_cues(
         elif log:
             log("auto-zone: fell back to default band")
     zones = _resolve_zones(zone_spec, info.width, info.height)
-    est_total = max(1, int(info.duration * sample_fps))
     frame_interval = 1.0 / sample_fps  # replaced by the decoder's REAL interval below
+    # Progress estimate. The decoder may sample at a slightly different rate than
+    # the nominal sample_fps (e.g. OpenCV steps whole source frames), so once the
+    # first frame reports the REAL interval we recompute est_total from it — this
+    # keeps the "frame i/est_total" log honest instead of e.g. "900/720".
+    est_total = max(1, int(info.duration * sample_fps))
     if log:
         log(f"video {info.width}x{info.height} @ {info.fps:.2f}fps, ~{info.duration:.0f}s, {len(zones)} zone(s)")
 
@@ -437,8 +465,26 @@ def extract_cues(
     for i, sf in enumerate(sample_frames_auto(video_path, sample_fps, cfg.get("decoder"), cfg.get("hwaccel"))):
         if i == 0 and sf.interval > 0:
             frame_interval = sf.interval  # adopt the decoder's REAL interval
-        for zi, (zx, zy, zw, zh) in enumerate(zones):
+            # Recompute the progress denominator from the REAL sampling rate so
+            # the frame counter can't overshoot (e.g. "900/720").
+            est_total = max(1, int(info.duration / frame_interval))
+        # Actual decoded frame dims can differ from the probe (rotation, SAR,
+        # decoder quirks); clamp each zone against THIS frame's shape per-frame.
+        fh, fw = sf.image.shape[:2]
+        for zi, (zx0, zy0, zw0, zh0) in enumerate(zones):
+            zx = max(0, min(zx0, fw - 1))
+            zy = max(0, min(zy0, fh - 1))
+            zw = max(1, min(zw0, fw - zx))
+            zh = max(1, min(zh0, fh - zy))
             crop = sf.image[zy:zy + zh, zx:zx + zw]
+            if crop.size == 0:
+                # Degenerate crop (zone fully outside this frame) — treat as no
+                # text and skip OCR rather than letting cvtColor/text_mask raise.
+                lines = []
+                grp_best[zi], grp_ocr[zi] = 0.0, 0
+                prev_mask[zi], prev_lines[zi], prev_pres[zi] = None, lines, 0.0
+                samples[zi].append((sf.timestamp, "", zone_an[zi], 0.0))
+                continue
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
             mask = text_mask(gray)
             fg = float(np.count_nonzero(mask)) / max(1, mask.size)
@@ -482,7 +528,9 @@ def extract_cues(
 
             good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
             text = _order_text(good)
-            conf = (sum(l.confidence for l in good) / len(good)) if good else 1.0
+            # Empty reads carry no confidence signal — use 0.0 so they don't
+            # inflate a cue's mean confidence in the vote.
+            conf = (sum(l.confidence for l in good) / len(good)) if good else 0.0
             samples[zi].append((sf.timestamp, text, zone_an[zi], conf))
 
         now = time.monotonic()
@@ -496,11 +544,12 @@ def extract_cues(
             merge_into_cues(
                 samples[zi],
                 frame_interval=frame_interval,
-                min_duration=float(cfg.get("min_subtitle_duration", 0.4)),
-                min_frames=int(cfg.get("min_frames", 2)),
-                min_gap=float(cfg.get("min_gap", 1.0)),
-                drop_junk=bool(cfg.get("drop_junk", True)),
-                char_voting=bool(cfg.get("char_voting", True)),
+                sim_threshold=float(cfg.get("sim_threshold", DEFAULT_SIM_THRESHOLD)),
+                min_duration=float(cfg.get("min_subtitle_duration", DEFAULT_MIN_SUBTITLE_DURATION)),
+                min_frames=int(cfg.get("min_frames", DEFAULT_MIN_FRAMES)),
+                min_gap=float(cfg.get("min_gap", DEFAULT_MIN_GAP)),
+                drop_junk=bool(cfg.get("drop_junk", DEFAULT_DROP_JUNK)),
+                char_voting=bool(cfg.get("char_voting", DEFAULT_CHAR_VOTING)),
             )
         )
     cues.sort(key=lambda c: c.start)
@@ -511,7 +560,16 @@ def extract_cues(
     # spans most of the video. Catches e.g. a "HentaiVOST.FR" watermark that
     # auto-zone clustering or a wide manual zone picks up as one long cue.
     if cfg.get("drop_permanent", True) and info.duration > 0:
-        cues = [c for c in cues if not ((c.end - c.start) > 12.0 and (c.end - c.start) > 0.5 * info.duration)]
+        # A real subtitle can legitimately run long on a short clip, so requiring
+        # >0.5*duration alone false-dropped long real cues. Require the cue to be
+        # BOTH long in absolute terms AND cover most of the clip (0.8) before
+        # treating it as a permanent overlay.
+        perm_secs = float(cfg.get("permanent_min_seconds", DEFAULT_PERMANENT_MIN_SECONDS))
+        perm_frac = float(cfg.get("permanent_min_fraction", DEFAULT_PERMANENT_MIN_FRACTION))
+        cues = [
+            c for c in cues
+            if not ((c.end - c.start) > perm_secs and (c.end - c.start) > perm_frac * info.duration)
+        ]
     # French-only deterministic normalizer: restore elision apostrophes and
     # split run-together words the OCR recognizer glued (wordlist-validated, so
     # it never rewrites valid words or introduces regressions).
@@ -532,8 +590,31 @@ def process_job(cfg: Config, client: APIClient, job: dict[str, Any], input_url: 
     formats = params.get("formats") or ["srt", "ass"]
 
     with tempfile.TemporaryDirectory(prefix="subext-") as tmp:
-        video_path = os.path.join(tmp, job.get("sourceFilename") or "input.bin")
+        # Defense-in-depth: never let a server-supplied filename escape the
+        # tempdir (path traversal). Keep only the extension of the reported name
+        # and write to a fixed "input" basename inside `tmp`.
+        ext = os.path.splitext(os.path.basename(job.get("sourceFilename") or ""))[1]
+        if len(ext) > 10 or any(c in ext for c in ("/", "\\", "\x00")):
+            ext = ""  # implausible/hostile extension → drop it
+        video_path = os.path.join(tmp, "input" + (ext or ".bin"))
 
+        # Point backends' per-call temp files (e.g. the PaddleOCR-VL PNG) inside
+        # this job dir so the TemporaryDirectory cleanup covers them and they
+        # don't leak on SIGKILL. Restored after the job.
+        prev_tmp_dir = os.environ.get("SUBEXT_TMP_DIR")
+        os.environ["SUBEXT_TMP_DIR"] = tmp
+        try:
+            _run_job_body(cfg, client, job, job_id, params, rcfg, language, formats,
+                          video_path, input_url, tmp, substitution_rules)
+        finally:
+            if prev_tmp_dir is None:
+                os.environ.pop("SUBEXT_TMP_DIR", None)
+            else:
+                os.environ["SUBEXT_TMP_DIR"] = prev_tmp_dir
+
+
+def _run_job_body(cfg, client, job, job_id, params, rcfg, language, formats,
+                  video_path, input_url, tmp, substitution_rules) -> None:
         client.progress(job_id, 2, "downloading", log="downloading input video")
         client.download(input_url, video_path)
 

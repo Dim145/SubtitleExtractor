@@ -1,12 +1,16 @@
 """HTTP client for the API's /internal worker protocol."""
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any
 
 import httpx
 
 from .config import Config
+
+log = logging.getLogger("subextractor")
 
 
 class JobCanceled(Exception):
@@ -59,10 +63,16 @@ class APIClient:
             raise JobCanceled(job_id)
 
     def heartbeat(self, job_id: str) -> None:
-        self._http.post(f"/api/internal/jobs/{job_id}/heartbeat")
+        resp = self._http.post(f"/api/internal/jobs/{job_id}/heartbeat")
+        if resp.status_code >= 300:
+            log.warning("heartbeat for job %s returned HTTP %s", job_id, resp.status_code)
 
     def log(self, job_id: str, message: str, level: str = "info") -> None:
-        self._http.post(f"/api/internal/jobs/{job_id}/log", json={"level": level, "message": message})
+        resp = self._http.post(
+            f"/api/internal/jobs/{job_id}/log", json={"level": level, "message": message}
+        )
+        if resp.status_code >= 300:
+            log.warning("log post for job %s returned HTTP %s", job_id, resp.status_code)
 
     def upload_result(self, job_id: str, file_path: str, kind: str, language: str | None = None) -> None:
         with open(file_path, "rb") as fh:
@@ -74,10 +84,32 @@ class APIClient:
             resp.raise_for_status()
 
     def complete(self, job_id: str, success: bool, error: str | None = None) -> None:
+        """Report terminal status. A failed complete leaves the job stuck
+        "running", so retry a few times with backoff and log loudly if it never
+        lands (the API's heartbeat-timeout reaper is the last-resort safety net)."""
         payload: dict[str, Any] = {"status": "success" if success else "failure"}
         if error:
             payload["error"] = error[:2000]
-        self._http.post(f"/api/internal/jobs/{job_id}/complete", json=payload)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = self._http.post(f"/api/internal/jobs/{job_id}/complete", json=payload)
+                if resp.status_code < 300:
+                    return
+                log.warning(
+                    "complete for job %s returned HTTP %s (attempt %d/3)",
+                    job_id, resp.status_code, attempt + 1,
+                )
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                log.warning("complete for job %s failed (attempt %d/3): %s", job_id, attempt + 1, exc)
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+        log.error(
+            "complete for job %s never succeeded; job may be stuck 'running' "
+            "until the API heartbeat reaper reclaims it%s",
+            job_id, f" ({last_exc})" if last_exc else "",
+        )
 
     def download(self, url: str, dest_path: str) -> None:
         """Download the input video. The URL may be absolute (S3) or API-relative (local)."""

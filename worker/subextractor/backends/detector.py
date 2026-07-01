@@ -15,6 +15,7 @@ LONG side instead, so det runs in ~25ms and still detects faint short cues.
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
 
@@ -23,6 +24,8 @@ log = logging.getLogger("subextractor")
 # Cache detectors by config, like the OCR backends — the det model load is not
 # free and the gate is called once per frame per zone.
 _det_cache: dict[tuple, "TextDetector"] = {}
+# Guards the check-then-set on `_det_cache` against a concurrent double-load.
+_det_cache_lock = threading.Lock()
 
 
 class TextDetector:
@@ -108,14 +111,20 @@ def get_detector(
     cached = _det_cache.get(key)
     if cached is not None:
         return cached
-    det = TextDetector(
-        ocr_version=ocr_version,
-        det_model_type=det_model_type,
-        limit_type=limit_type,
-        limit_side_len=limit_side_len,
-    )
-    _det_cache[key] = det
-    return det
+    # Serialize the load; re-check inside the lock (another thread may have built
+    # it while we waited) so we never load the same detector twice.
+    with _det_cache_lock:
+        cached = _det_cache.get(key)
+        if cached is not None:
+            return cached
+        det = TextDetector(
+            ocr_version=ocr_version,
+            det_model_type=det_model_type,
+            limit_type=limit_type,
+            limit_side_len=limit_side_len,
+        )
+        _det_cache[key] = det
+        return det
 
 
 def unload_detectors() -> int:

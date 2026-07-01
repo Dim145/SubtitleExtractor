@@ -85,6 +85,9 @@ class PaddleOCRVLBackend(OCRBackend):
             self._rep_penalty = float(os.environ.get("PADDLEOCR_VL_REPETITION_PENALTY", "1.05"))
         except ValueError:
             self._rep_penalty = 1.05
+        # Whether this mlx_vlm build requires a file path (vs an in-memory PIL
+        # image). Discovered on first use, then cached to avoid retrying.
+        self._needs_path = False
         # Loaded once and kept resident — reloading per frame would dominate runtime.
         self._model, self._processor = load(self.model_id)
         self._config = load_config(self.model_id)
@@ -102,38 +105,58 @@ class PaddleOCRVLBackend(OCRBackend):
         except Exception:
             pass
 
-    def recognize(self, image: np.ndarray) -> list[OCRLine]:
-        from PIL import Image
-
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
-
-        path = ""
+    def _run_generate(self, image_arg, prompt, gen_kwargs):
+        """Invoke mlx_vlm.generate, dropping repetition_penalty if unsupported."""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            return self._generate(
+                self._model, self._processor, prompt, image=image_arg,
+                repetition_penalty=self._rep_penalty, **gen_kwargs,
+            )
+        except TypeError:
+            return self._generate(
+                self._model, self._processor, prompt, image=image_arg, **gen_kwargs,
+            )
+
+    def _generate_image(self, pil, prompt, gen_kwargs):
+        """Prefer passing the in-memory PIL image (no temp file to leak). Older
+        mlx_vlm builds only accept file paths, so on failure fall back to a temp
+        PNG written under SUBEXT_TMP_DIR (defaults to the system tmp) and always
+        removed in `finally` — the pipeline's TemporaryDirectory covers it when
+        SUBEXT_TMP_DIR points inside the job dir, avoiding a SIGKILL leak."""
+        if not self._needs_path:
+            try:
+                return self._run_generate([pil], prompt, gen_kwargs)
+            except Exception:  # noqa: BLE001
+                # This mlx build doesn't accept in-memory images; remember it and
+                # use the file path from now on.
+                self._needs_path = True
+        path = ""
+        tmp_dir = os.environ.get("SUBEXT_TMP_DIR") or None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=tmp_dir) as f:
                 path = f.name
             pil.save(path)
-            prompt = self._apply_chat_template(self._processor, self._config, OCR_PROMPT, num_images=1)
-            # Anti-hallucination knobs: greedy decode (temp 0), a tight token budget
-            # (subtitle bands are short — long output is almost always a loop), and a
-            # mild repetition penalty. The penalty kwarg name varies across mlx_vlm
-            # versions, so it's applied opportunistically and dropped if unsupported.
-            gen_kwargs = dict(max_tokens=96, temperature=0.0, verbose=False)
-            try:
-                result = self._generate(
-                    self._model, self._processor, prompt, image=[path],
-                    repetition_penalty=self._rep_penalty, **gen_kwargs,
-                )
-            except TypeError:
-                result = self._generate(
-                    self._model, self._processor, prompt, image=[path], **gen_kwargs,
-                )
+            return self._run_generate([path], prompt, gen_kwargs)
         finally:
             if path:
                 try:
                     os.remove(path)
                 except OSError:
                     pass
+
+    def recognize(self, image: np.ndarray) -> list[OCRLine]:
+        from PIL import Image
+
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(rgb)
+
+        prompt = self._apply_chat_template(self._processor, self._config, OCR_PROMPT, num_images=1)
+        # Anti-hallucination knobs: greedy decode (temp 0), a tight token budget
+        # (subtitle bands are short — long output is almost always a loop), and a
+        # mild repetition penalty. The penalty kwarg name varies across mlx_vlm
+        # versions, so it's applied opportunistically and dropped if unsupported.
+        gen_kwargs = dict(max_tokens=96, temperature=0.0, verbose=False)
+        result = self._generate_image(pil, prompt, gen_kwargs)
 
         text = getattr(result, "text", result)
         text = (text or "").strip()
