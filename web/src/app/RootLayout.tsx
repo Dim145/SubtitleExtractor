@@ -33,6 +33,11 @@ export function RootLayout() {
 
   return (
     <div className="min-h-full">
+      {/* Skip link: first focusable element, visually hidden until focused. */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-accent focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-accent-foreground"
+      >Skip to content</a>
       <header className="sticky top-0 z-30 flex h-14 items-center gap-4 border-b border-border bg-surface/85 px-4 backdrop-blur">
         <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
           <span className="grid size-7 place-items-center rounded-lg bg-gradient-to-br from-accent to-amber text-accent-foreground">
@@ -67,7 +72,7 @@ export function RootLayout() {
         <ProfileMenu />
       </header>
 
-      <main className="min-h-[calc(100%-3.5rem)]">
+      <main id="main" tabIndex={-1} className="min-h-[calc(100%-3.5rem)] focus:outline-none">
         <div key={pathname} className="route-fade">
           <Outlet />
         </div>

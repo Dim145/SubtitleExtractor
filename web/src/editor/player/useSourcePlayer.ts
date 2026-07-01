@@ -59,16 +59,12 @@ export function useSourcePlayer(source: { file?: File | null; url?: string | nul
 
   const videoSrc = (file ? objectUrl : url) ?? undefined;
 
-  // Object URL lifecycle for a File source.
-  useEffect(() => {
-    if (!file) { setObjectUrl(null); return; }
-    const u = URL.createObjectURL(file);
-    setObjectUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [file]);
-
-  // Reset when the source changes — tear down any existing decoder + rAF first
-  // so we don't leak the previous source's WebCodecs decoder.
+  // Unified source lifecycle: create the object URL for a File source AND reset
+  // player state (mode/time/decoder) in the SAME effect, so <video src> never
+  // references a URL that was revoked by a separately-timed cleanup. Under
+  // StrictMode's double-invoke the revoke happens in this effect's own cleanup,
+  // in lockstep with the reset, so there's no window where src points at a
+  // revoked blob.
   useEffect(() => {
     setMode("loading"); setError(null); setPlaying(false);
     setCurrentTime(0); setDuration(0); timeRef.current = 0; playRef.current = false;
@@ -76,6 +72,11 @@ export function useSourcePlayer(source: { file?: File | null; url?: string | nul
     decoderRef.current?.destroy();
     decoderRef.current = null;
     framesDurRef.current = 0;
+
+    if (!file) { setObjectUrl(null); return; }
+    const u = URL.createObjectURL(file);
+    setObjectUrl(u);
+    return () => { setObjectUrl(null); URL.revokeObjectURL(u); };
   }, [file, url]);
 
   const draw = useCallback((bmp: ImageBitmap) => {

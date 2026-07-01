@@ -17,9 +17,12 @@ export function Switch({
       type="button" role="switch" aria-checked={checked} aria-label={ariaLabel} id={id} disabled={disabled}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "relative inline-flex h-[22px] w-[38px] shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors",
+        "relative inline-flex h-[22px] w-[38px] shrink-0 cursor-pointer items-center rounded-full border p-0.5 transition-colors",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
-        checked ? "bg-accent" : "bg-border-strong",
+        // Off state: a distinct track fill + a stronger border so the control
+        // boundary meets 3:1 and isn't conveyed by color alone (the thumb
+        // position already carries state too).
+        checked ? "border-accent bg-accent" : "border-muted bg-surface-3",
         disabled && "cursor-not-allowed opacity-50",
         className,
       )}

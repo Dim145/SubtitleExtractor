@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Plus, Trash2, Save, Download, Check, X, ChevronDown, ArrowUpToLine, ArrowDownToLine, TriangleAlert, ArrowLeftRight, RotateCcw } from "lucide-react";
@@ -17,6 +17,7 @@ import { downloadableUrl } from "@/lib/url";
 import { subtitleFilename } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { useDialog } from "@/components/ui/useDialog";
+import { useToast } from "@/components/ui/toast";
 
 type Format = "ass" | "srt" | "vtt";
 
@@ -40,6 +41,7 @@ export function Editor() {
   const { id = "" } = useParams({ strict: false });
   const { data: job } = useJob(id);
   const qc = useQueryClient();
+  const toast = useToast();
 
   // The result this editor loaded (so "overwrite" targets the right file).
   const [sourceResultId, setSourceResultId] = useState<string | null>(null);
@@ -70,6 +72,20 @@ export function Editor() {
   const [shiftTotal, setShiftTotal] = useState(0);
 
   const [waveEl, setWaveEl] = useState<HTMLDivElement | null>(null);
+  // Polite screen-reader announcements (cue created, etc.).
+  const [announce, setAnnounce] = useState("");
+  const [zoomPx, setZoomPx] = useState(60); // waveform zoom (px/sec) for aria-valuetext
+  const [helpOpen, setHelpOpen] = useState(false); // keyboard-shortcuts legend
+  // Keys ("s-<id>" / "e-<id>") of timecode fields whose last blur failed to
+  // parse — drives an inline red border so the drop isn't silent (item 21).
+  const [invalidTimes, setInvalidTimes] = useState<Set<string>>(new Set());
+  const markTimeValid = (key: string, valid: boolean) =>
+    setInvalidTimes((prev) => {
+      if (valid === !prev.has(key)) return prev;
+      const next = new Set(prev);
+      if (valid) next.delete(key); else next.add(key);
+      return next;
+    });
   const cueListRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLDivElement>(null);
   const shiftRef = useRef<HTMLDivElement>(null);
@@ -82,6 +98,18 @@ export function Editor() {
   // currentTime in a ref so editing hotkeys don't rebind on every frame.
   const timeRef = useRef(0);
   timeRef.current = currentTime;
+
+  // Chronologically-sorted view of the cues for display + active lookup. The
+  // `cues` state isn't re-sorted on every timing patch, so anything positional
+  // (row numbers, overlay, active highlight, ↑/↓ navigation) reads this instead.
+  const sortedCues = useMemo(() => [...cues].sort((a, b) => a.start - b.start), [cues]);
+
+  // Latest cues/selection in refs so the global keydown handler binds once
+  // (mirrors the timeRef pattern) instead of rebinding on every keystroke.
+  const sortedRef = useRef(sortedCues);
+  sortedRef.current = sortedCues;
+  const selectedRef = useRef<string | null>(selectedId);
+  selectedRef.current = selectedId;
 
   // ---- load existing subtitles ----
   useEffect(() => {
@@ -138,12 +166,12 @@ export function Editor() {
   });
 
   // active cue (under the playhead) — drives the caption overlay + auto-scroll.
-  const activeId = useMemo(() => cues.find((c) => currentTime >= c.start && currentTime < c.end)?.id ?? null, [cues, currentTime]);
+  const activeId = useMemo(() => sortedCues.find((c) => currentTime >= c.start && currentTime < c.end)?.id ?? null, [sortedCues, currentTime]);
   useEffect(() => {
     const el = cueListRef.current?.querySelector(`[data-cue="${activeId}"]`);
     el?.scrollIntoView({ block: "nearest" });
   }, [activeId]);
-  const activeCue = cues.find((c) => c.id === activeId);
+  const activeCue = sortedCues.find((c) => c.id === activeId);
 
   // Cues OCR flagged as low-confidence — surfaced as a "N to review" chip.
   const lowConfCount = useMemo(() => cues.filter(isLowConfidence).length, [cues]);
@@ -173,11 +201,14 @@ export function Editor() {
     const c = newCue(s, e);
     setCues((prev) => [...prev, c].sort((a, b) => a.start - b.start));
     setSelectedId(c.id); setDirty(true); focusCue(c.id);
+    setAnnounce(`Cue added at ${displayTime(s)}.`);
   }
   /** Add at the playhead, clamped so it doesn't overrun the next cue. */
   function addCueAtPlayhead() {
     const t = timeRef.current;
-    const next = cues.filter((c) => c.start > t).sort((a, b) => a.start - b.start)[0];
+    // Read the latest cues via the ref so the once-bound keydown handler (N) and
+    // late clicks both see current state, not a stale render-time snapshot.
+    const next = sortedRef.current.find((c) => c.start > t);
     addCueRange(t, next ? Math.min(t + 2, next.start) : t + 2);
   }
   /** Insert into the gap after `beforeEnd` (afterStart = next cue's start, null at the end). */
@@ -238,6 +269,9 @@ export function Editor() {
       setSaveOpen(false);
       qc.invalidateQueries({ queryKey: ["job-results", id] });
       qc.invalidateQueries({ queryKey: ["jobs"] });
+      toast.success("Subtitles saved.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Save failed");
     } finally { setSaving(false); }
   }
   function exportFile() {
@@ -245,17 +279,39 @@ export function Editor() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = subtitleFilename(job?.sourceFilename, format); a.click();
-    URL.revokeObjectURL(url);
+    // Defer the revoke so the click-driven download isn't aborted.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast.success("Subtitle file exported.");
   }
 
-  // Editing keys ([ / ] set in/out at the playhead · ↑/↓ move selection).
+  // Editing keys ([ / ] set in/out at the playhead · ↑/↓ move selection ·
+  // , / . nudge the selected cue's in/out, Shift for a coarser step).
   // Transport keys (Space, ← →, Home) live in usePlayerHotkeys, shared site-wide.
+  // Reads cues/selection via refs so it binds ONCE (not on every keystroke).
+  const nudgeSelected = useCallback((edge: "start" | "end", delta: number) => {
+    const sel = selectedRef.current;
+    if (!sel) return;
+    setCues((prev) => prev.map((c) => {
+      if (c.id !== sel) return c;
+      if (edge === "start") return { ...c, start: Math.max(0, Math.min(c.start + delta, c.end - 0.05)) };
+      return { ...c, end: Math.max(c.end + delta, c.start + 0.05) };
+    }));
+    setDirty(true);
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (["INPUT", "TEXTAREA"].includes(t.tagName) || t.isContentEditable) return;
-      if (e.key === "[" && selectedId) { e.preventDefault(); patch(selectedId, { start: timeRef.current }); return; }
-      if (e.key === "]" && selectedId) { e.preventDefault(); patch(selectedId, { end: timeRef.current }); return; }
+      const sel = selectedRef.current;
+      const list = sortedRef.current;
+      if (e.key === "[" && sel) { e.preventDefault(); patch(sel, { start: timeRef.current }); return; }
+      if (e.key === "]" && sel) { e.preventDefault(); patch(sel, { end: timeRef.current }); return; }
+      if ((e.key === "," || e.key === ".") && sel) {
+        e.preventDefault();
+        const step = e.shiftKey ? 0.5 : 0.05;
+        nudgeSelected(e.key === "," ? "start" : "end", e.key === "," ? -step : step);
+        return;
+      }
       if (e.key === "n" || e.key === "N") { e.preventDefault(); addCueAtPlayhead(); return; }
       if (e.key === "i" || e.key === "I") { e.preventDefault(); setMarkIn(timeRef.current); return; }
       if (e.key === "o" || e.key === "O") {
@@ -266,17 +322,18 @@ export function Editor() {
       }
       if (e.key === "Escape" && markInRef.current != null) { setMarkIn(null); return; }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        if (!cues.length) return;
+        if (!list.length) return;
         e.preventDefault();
-        const idx = cues.findIndex((c) => c.id === selectedId);
-        const ni = Math.max(0, Math.min(cues.length - 1, (idx < 0 ? 0 : idx) + (e.key === "ArrowDown" ? 1 : -1)));
-        const c = cues[ni];
+        const idx = list.findIndex((c) => c.id === sel);
+        const ni = Math.max(0, Math.min(list.length - 1, (idx < 0 ? 0 : idx) + (e.key === "ArrowDown" ? 1 : -1)));
+        const c = list[ni];
         if (c) { setSelectedId(c.id); player.seek(c.start); }
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectedId, cues, player.seek]);
+    // player.seek is stable (useCallback in useSourcePlayer); binds once.
+  }, [player.seek, nudgeSelected]);
 
   // Close the add-menu when clicking outside it.
   useEffect(() => {
@@ -309,10 +366,12 @@ export function Editor() {
           <Link to="/jobs/$id" params={{ id }}><Button variant="ghost" size="sm"><ArrowLeft className="size-4" /> Job</Button></Link>
           <h1 className="truncate text-lg font-semibold tracking-tight">{job?.sourceFilename ?? "Editor"}</h1>
         </div>
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-2 text-xs" aria-live="polite">
           {dirty ? <span className="text-amber">● Unsaved</span> : <span className="flex items-center gap-1 text-ok"><Check className="size-3.5" /> Saved</span>}
         </div>
       </div>
+      {/* Polite live region for cue-creation and similar announcements. */}
+      <div aria-live="polite" className="sr-only">{announce}</div>
 
       <div className="overflow-hidden rounded-xl border border-border bg-surface">
         {/* toolbar */}
@@ -428,10 +487,18 @@ export function Editor() {
             <div className="p-3">
               {player.mode === "video" ? (
                 <>
-                  <div ref={setWaveEl} className="rounded-lg border border-border bg-surface-2 p-1" />
+                  <div
+                    ref={setWaveEl} tabIndex={0} role="group" aria-label="Subtitle timeline"
+                    className="rounded-lg border border-border bg-surface-2 p-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  />
                   <div className="mt-2 flex items-center gap-2 text-xs text-faint">
-                    <input type="range" min={20} max={220} defaultValue={60} onChange={(e) => wave.zoom(Number(e.target.value))} className="w-32" />
-                    <span className="font-mono">zoom</span>
+                    <label htmlFor="wave-zoom" className="font-mono">zoom</label>
+                    <input
+                      id="wave-zoom" type="range" min={20} max={220} defaultValue={60}
+                      aria-label="Waveform zoom" aria-valuetext={`${zoomPx} pixels per second`}
+                      onChange={(e) => { const v = Number(e.target.value); setZoomPx(v); wave.zoom(v); }}
+                      className="w-32"
+                    />
                   </div>
                 </>
               ) : player.mode === "canvas" ? (
@@ -440,10 +507,11 @@ export function Editor() {
             </div>
           </div>
 
-          {/* cue table */}
-          <div className="flex max-h-[560px] flex-col">
-            <div className="grid grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint sm:grid-cols-[28px_88px_1fr_32px]">
-              <span>#</span><span>Time</span><span>Text</span><span />
+          {/* cue table. Below lg it takes natural height (no fixed max-h that
+              would trap it in a tiny scroller on small screens). */}
+          <div className="flex flex-col lg:max-h-[560px]" role="grid" aria-label="Subtitle cues" aria-rowcount={sortedCues.length}>
+            <div role="row" className="grid grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-faint sm:grid-cols-[28px_88px_1fr_32px]">
+              <span role="columnheader">#</span><span role="columnheader">Time</span><span role="columnheader">Text</span><span role="columnheader" aria-label="Actions" />
             </div>
             <div ref={cueListRef} className="overflow-auto">
               {loading ? (
@@ -463,10 +531,11 @@ export function Editor() {
                 </div>
               ) : (
                 <>
-                  {cues.map((c, i) => (
+                  {sortedCues.map((c, i) => (
                     <Fragment key={c.id}>
                       <div
-                        data-cue={c.id}
+                        data-cue={c.id} role="row" aria-rowindex={i + 1}
+                        aria-selected={c.id === selectedId}
                         onClick={() => { setSelectedId(c.id); player.seek(c.start); }}
                         className={cn(
                           "grid cursor-pointer grid-cols-[28px_88px_1fr_40px] gap-2 border-b border-border px-3 py-2 text-sm sm:grid-cols-[28px_88px_1fr_32px]",
@@ -476,7 +545,7 @@ export function Editor() {
                           c.id === selectedId ? "bg-accent/10 shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-surface-2",
                         )}
                       >
-                        <span className="flex items-start gap-1 pt-1 font-mono text-xs text-faint">
+                        <span role="gridcell" className="flex items-start gap-1 pt-1 font-mono text-xs text-faint">
                           {i + 1}
                           {isLowConfidence(c) && (
                             <span
@@ -488,37 +557,54 @@ export function Editor() {
                             </span>
                           )}
                         </span>
-                        <div className="grid gap-1" onClick={(e) => e.stopPropagation()}>
+                        <div role="gridcell" className="grid gap-1" onClick={(e) => e.stopPropagation()}>
                           <input
                             defaultValue={displayTime(c.start)} key={`s-${c.id}-${c.start}`}
                             inputMode="decimal" aria-label={`Cue ${i + 1} start time`}
-                            onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { start: v }); }}
-                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-amber hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
+                            aria-invalid={invalidTimes.has(`s-${c.id}`) || undefined}
+                            onBlur={(e) => {
+                              const v = parseDisplayTime(e.target.value);
+                              if (v != null) { markTimeValid(`s-${c.id}`, true); patch(c.id, { start: v }); }
+                              else { markTimeValid(`s-${c.id}`, false); e.target.value = displayTime(c.start); } // revert visibly
+                            }}
+                            className={cn(
+                              "w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-amber hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]",
+                              invalidTimes.has(`s-${c.id}`) && "border-err",
+                            )}
                           />
                           <input
                             defaultValue={displayTime(c.end)} key={`e-${c.id}-${c.end}`}
                             inputMode="decimal" aria-label={`Cue ${i + 1} end time`}
-                            onBlur={(e) => { const v = parseDisplayTime(e.target.value); if (v != null) patch(c.id, { end: v }); }}
-                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-faint hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]"
+                            aria-invalid={invalidTimes.has(`e-${c.id}`) || undefined}
+                            onBlur={(e) => {
+                              const v = parseDisplayTime(e.target.value);
+                              if (v != null) { markTimeValid(`e-${c.id}`, true); patch(c.id, { end: v }); }
+                              else { markTimeValid(`e-${c.id}`, false); e.target.value = displayTime(c.end); } // revert visibly
+                            }}
+                            className={cn(
+                              "w-full rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[16px] text-faint hover:border-border focus:border-accent focus:bg-surface-2 sm:text-[13px]",
+                              invalidTimes.has(`e-${c.id}`) && "border-err",
+                            )}
                           />
                         </div>
                         <textarea
-                          defaultValue={c.text} key={`t-${c.id}`} rows={2}
+                          defaultValue={c.text} key={`t-${c.id}`} rows={2} role="gridcell"
+                          aria-label={`Cue ${i + 1} text`}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => patch(c.id, { text: e.target.value })}
                           className="resize-none rounded border border-transparent bg-transparent px-1.5 py-1 text-[13px] leading-snug hover:border-border focus:border-accent focus:bg-surface-2"
                         />
                         <button
-                          type="button" title="Delete cue" aria-label={`Delete cue ${i + 1}`}
+                          type="button" title="Delete cue" aria-label={`Delete cue ${i + 1}`} role="gridcell"
                           onClick={(e) => { e.stopPropagation(); delCue(c.id); }}
                           className="grid size-9 self-start place-items-center rounded text-faint transition hover:bg-err/15 hover:text-err sm:size-7"
                         ><X className="size-4" /></button>
                       </div>
-                      {i < cues.length - 1 && (
+                      {i < sortedCues.length - 1 && (
                         <div className="group/ins relative h-1.5">
                           <button
                             type="button" aria-label={`Insert a cue between ${i + 1} and ${i + 2}`}
-                            onClick={() => insertBetween(c.end, cues[i + 1].start)}
+                            onClick={() => insertBetween(c.end, sortedCues[i + 1].start)}
                             className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full border border-accent/50 bg-surface px-2 py-0.5 text-[11px] text-accent opacity-0 transition focus-visible:opacity-100 group-hover/ins:opacity-100"
                           ><Plus className="size-3" /> insert</button>
                         </div>
@@ -535,7 +621,42 @@ export function Editor() {
           </div>
         </div>
       </div>
-      <p className="mt-2 text-xs text-muted">Drag the waveform to draw a cue · N add at playhead · I / O mark in/out · [ / ] set in/out · ↑ ↓ select · Space play/pause · ← → seek 5s · edits aren’t saved until you hit Save.</p>
+      <div className="relative mt-2 flex items-center gap-2 text-xs text-muted">
+        <span>Drag the waveform to draw a cue. Edits aren’t saved until you hit Save.</span>
+        <button
+          type="button" aria-haspopup="dialog" aria-expanded={helpOpen}
+          onClick={() => setHelpOpen((o) => !o)}
+          className="grid size-5 shrink-0 place-items-center rounded-full border border-border-strong font-mono text-[11px] text-faint transition hover:border-accent hover:text-accent"
+        >?</button>
+        {helpOpen && (
+          <div role="dialog" aria-label="Keyboard shortcuts"
+            className="absolute bottom-full left-0 z-30 mb-2 w-80 rounded-lg border border-border-strong bg-surface p-3 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Keyboard shortcuts</div>
+              <button type="button" aria-label="Close shortcuts" onClick={() => setHelpOpen(false)} className="grid size-5 place-items-center rounded text-faint hover:bg-surface-2 hover:text-text"><X className="size-3.5" /></button>
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <div>
+                <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-faint">Transport</div>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
+                  <dt><kbd className="font-mono text-accent">Space</kbd></dt><dd>Play / pause</dd>
+                  <dt><kbd className="font-mono text-accent">← →</kbd></dt><dd>Seek ±5s</dd>
+                </dl>
+              </div>
+              <div>
+                <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-faint">Editing</div>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
+                  <dt><kbd className="font-mono text-accent">N</kbd></dt><dd>Add cue at playhead</dd>
+                  <dt><kbd className="font-mono text-accent">I</kbd> / <kbd className="font-mono text-accent">O</kbd></dt><dd>Mark in / out</dd>
+                  <dt><kbd className="font-mono text-accent">[</kbd> / <kbd className="font-mono text-accent">]</kbd></dt><dd>Set in / out</dd>
+                  <dt><kbd className="font-mono text-accent">,</kbd> / <kbd className="font-mono text-accent">.</kbd></dt><dd>Nudge in / out (Shift = coarser)</dd>
+                  <dt><kbd className="font-mono text-accent">↑ ↓</kbd></dt><dd>Select prev / next cue</dd>
+                </dl>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {saveOpen && (
         <SaveDialog

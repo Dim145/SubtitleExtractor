@@ -8,6 +8,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge, ProgressBar } from "@/components/StatusBadge";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
 
 // Lazy: pulls react-rnd (+ the decoder/OCR on demand) only when opening the modal.
 const ZonePicker = lazy(() => import("@/editor/ZonePicker").then((m) => ({ default: m.ZonePicker })));
@@ -46,23 +48,28 @@ export function Dashboard() {
         </div>
       )}
 
-      <label
-        role="button" tabIndex={0} aria-label="Upload a video — drop a file or press Enter to browse"
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileRef.current?.click(); } }}
+      {/* Drop target region (sibling of the hidden input + trigger button). The
+          region isn't a control itself; the labeled button below triggers the
+          file picker so browse works with a real, named control. */}
+      <div
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
         onDrop={(e) => { e.preventDefault(); setDrag(false); setPickerFile(e.dataTransfer.files?.[0] ?? null); }}
         className={cn(
-          "animate-in group mb-6 grid cursor-pointer place-items-center rounded-xl border border-dashed border-border-strong bg-surface px-6 py-9 text-center transition-colors hover:border-accent/50 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2",
+          "animate-in group mb-6 grid place-items-center rounded-xl border border-dashed border-border-strong bg-surface px-6 py-9 text-center transition-colors",
           drag && "border-accent bg-accent/5",
         )}
       >
-        <input ref={fileRef} type="file" accept="video/*,.mkv,.mp4" className="hidden"
+        <input ref={fileRef} type="file" accept="video/*,.mkv,.mp4" aria-label="Choose a video to upload" className="sr-only"
                onChange={(e) => { setPickerFile(e.target.files?.[0] ?? null); e.target.value = ""; }} />
         <span className={cn("mb-3 grid size-11 place-items-center rounded-xl bg-surface-2 text-accent transition-transform group-hover:scale-105", drag && "scale-110")}><UploadCloud className="size-5" /></span>
-        <div className="font-medium">Drop a video, or click to browse</div>
+        <div className="font-medium">Drop a video here</div>
         <div className="mt-1 text-sm text-muted">MP4 / MKV · outputs SRT, ASS &amp; VTT</div>
-      </label>
+        <button
+          type="button" onClick={() => fileRef.current?.click()}
+          className="mt-3 rounded-lg border border-border-strong bg-surface-2 px-3 py-1.5 text-sm font-medium transition-colors hover:border-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >Browse for a file</button>
+      </div>
 
       {jobs.isLoading ? (
         <div className="overflow-hidden rounded-xl border border-border">
@@ -102,8 +109,33 @@ function JobRow({ job, index }: { job: Job; index: number }) {
   const navigate = useNavigate();
   const cancel = useCancelJob();
   const del = useDeleteJob();
+  const toast = useToast();
+  const [confirm, confirmDialog] = useConfirm();
   const active = ACTIVE.includes(job.status);
   const stop = (e: React.MouseEvent) => e.stopPropagation();
+
+  async function onCancel() {
+    if (!(await confirm({
+      title: "Cancel this job?",
+      message: `"${job.sourceFilename}" will stop processing. Any partial results are discarded and the worker is freed.`,
+      confirmLabel: "Cancel job", cancelLabel: "Keep running",
+    }))) return;
+    cancel.mutate(job.id, {
+      onSuccess: () => toast.success("Job canceled."),
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Cancel failed"),
+    });
+  }
+  async function onDelete() {
+    if (!(await confirm({
+      title: "Delete this job?",
+      message: `"${job.sourceFilename}", its subtitles and source video will be permanently removed. This can't be undone.`,
+      confirmLabel: "Delete job",
+    }))) return;
+    del.mutate(job.id, {
+      onSuccess: () => toast.success("Job deleted."),
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Delete failed"),
+    });
+  }
 
   return (
     <div
@@ -134,21 +166,22 @@ function JobRow({ job, index }: { job: Job; index: number }) {
         {active && (
           <Button
             variant="ghost" size="icon" aria-label="Cancel job"
-            title={cancel.isError ? "Cancel failed — try again" : "Cancel"}
+            title="Cancel"
             disabled={cancel.isPending}
-            onClick={() => cancel.mutate(job.id)}
+            onClick={onCancel}
           >{cancel.isPending ? <Spinner /> : <X className="size-4" />}</Button>
         )}
         {!active && (
           <Button
             variant="ghost" size="icon" aria-label="Delete job" className="hover:text-err"
-            title={del.isError ? "Delete failed — try again" : "Delete"}
+            title="Delete"
             disabled={del.isPending}
-            onClick={() => del.mutate(job.id)}
+            onClick={onDelete}
           >{del.isPending ? <Spinner /> : <Trash2 className="size-4" />}</Button>
         )}
         <ChevronRight aria-hidden="true" className="size-4 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-muted" />
       </div>
+      {confirmDialog}
     </div>
   );
 }

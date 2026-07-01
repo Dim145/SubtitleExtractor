@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { useDialog } from "@/components/ui/useDialog";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
+import { useToast } from "@/components/ui/toast";
 import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
@@ -62,6 +64,8 @@ function Workers() {
   const workers = useAdminWorkers();
   const patch = usePatchWorker();
   const del = useDeleteWorker();
+  const toast = useToast();
+  const [confirm, confirmDialog] = useConfirm();
   const [openId, setOpenId] = useState<string | null>(null);
 
   if (workers.isLoading) return <Loading />;
@@ -69,8 +73,21 @@ function Workers() {
 
   const dot = (s: Worker["status"]) => s === "online" ? "bg-ok" : s === "busy" ? "bg-accent animate-pulse" : "bg-faint";
 
+  async function removeWorker(w: Worker) {
+    if (!(await confirm({
+      title: "Delete this worker?",
+      message: `"${w.name}" will be removed from the registry. It can re-register on its next heartbeat, but queued jobs targeting it may stall until then.`,
+      confirmLabel: "Delete worker",
+    }))) return;
+    del.mutate(w.id, {
+      onSuccess: () => toast.success("Worker deleted."),
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Delete failed"),
+    });
+  }
+
   return (
     <div className="grid gap-3">
+      {confirmDialog}
       {workers.data.map((w) => (
         <div key={w.id} className="rounded-xl border border-border bg-surface">
           <div className="flex items-center gap-3 px-4 py-3">
@@ -83,7 +100,7 @@ function Workers() {
             <Button variant="ghost" size="sm" onClick={() => setOpenId(openId === w.id ? null : w.id)}>
               Configure <ChevronDown className={cn("size-3.5 transition-transform", openId === w.id && "rotate-180")} />
             </Button>
-            <Button variant="ghost" size="icon" className="hover:text-err" onClick={() => del.mutate(w.id)}><Trash2 className="size-4" /></Button>
+            <Button variant="ghost" size="icon" className="hover:text-err" aria-label={`Delete worker ${w.name}`} onClick={() => removeWorker(w)}><Trash2 className="size-4" /></Button>
           </div>
           {openId === w.id && <WorkerConfig worker={w} />}
         </div>
@@ -159,20 +176,37 @@ function regexError(r: OCRSubstitutionRule): boolean {
 function Substitutions() {
   const settings = useAdminSettings();
   const save = useSaveSettings();
+  const toast = useToast();
+  const [confirm, confirmDialog] = useConfirm();
   const [rules, setRules] = useState<OCRSubstitutionRule[]>([]);
   const [saved, setSaved] = useState(false);
   useEffect(() => { if (settings.data) setRules(settings.data.ocrSubstitutionRules ?? []); }, [settings.data]);
   const bad = useMemo(() => rules.some(regexError), [rules]);
   if (settings.isLoading) return <Loading />;
 
+  async function removeRule(i: number, rule: OCRSubstitutionRule) {
+    // Only confirm rules with content — empty draft rows are removed silently.
+    if ((rule.find.trim() || rule.replace.trim()) && !(await confirm({
+      title: "Remove this substitution?",
+      message: `The rule "${rule.find || "(empty)"} → ${rule.replace || "(empty)"}" will be dropped. It takes effect after you save the rules.`,
+      confirmLabel: "Remove rule",
+    }))) return;
+    setSaved(false);
+    setRules((rs) => rs.filter((_, idx) => idx !== i));
+  }
+
   const patch = (i: number, p: Partial<OCRSubstitutionRule>) => { setSaved(false); setRules((rs) => rs.map((r, idx) => idx === i ? { ...r, ...p } : r)); };
   function submit() {
     if (!settings.data || bad) return;
-    save.mutate({ ...settings.data, ocrSubstitutionRules: rules.filter((r) => r.find.trim()) }, { onSuccess: () => setSaved(true) });
+    save.mutate({ ...settings.data, ocrSubstitutionRules: rules.filter((r) => r.find.trim()) }, {
+      onSuccess: () => { setSaved(true); toast.success("Substitution rules saved."); },
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Save failed"),
+    });
   }
 
   return (
     <div className="rounded-xl border border-border bg-surface p-5">
+      {confirmDialog}
       <div className="mb-4 flex items-center justify-between">
         <div><div className={eyebrow}>OCR substitutions</div><p className="mt-1 text-sm text-muted">Find &amp; replace applied on every worker after extraction.</p></div>
         <Button size="sm" onClick={() => { setSaved(false); setRules((r) => [...r, { find: "", replace: "", isRegex: false, applyTo: "all" }]); }}><Plus className="size-3.5" /> Add rule</Button>
@@ -184,13 +218,13 @@ function Substitutions() {
           </div>
           {rules.map((r, i) => (
             <div key={i} className="grid grid-cols-[1fr_1fr_64px_120px_36px] items-center gap-2">
-              <input className={cn(input, "font-mono", regexError(r) && "border-err")} value={r.find} onChange={(e) => patch(i, { find: e.target.value })} placeholder="pattern" />
-              <input className={cn(input, "font-mono")} value={r.replace} onChange={(e) => patch(i, { replace: e.target.value })} placeholder="replacement" />
-              <div className="flex justify-center"><Switch checked={r.isRegex} onCheckedChange={(v) => patch(i, { isRegex: v })} aria-label="Regex" /></div>
-              <select className={input} value={r.applyTo} onChange={(e) => patch(i, { applyTo: e.target.value })}>
+              <input className={cn(input, "font-mono", regexError(r) && "border-err")} aria-label={`Rule ${i + 1} find pattern`} value={r.find} onChange={(e) => patch(i, { find: e.target.value })} placeholder="pattern" />
+              <input className={cn(input, "font-mono")} aria-label={`Rule ${i + 1} replacement`} value={r.replace} onChange={(e) => patch(i, { replace: e.target.value })} placeholder="replacement" />
+              <div className="flex justify-center"><Switch checked={r.isRegex} onCheckedChange={(v) => patch(i, { isRegex: v })} aria-label={`Rule ${i + 1} is a regex`} /></div>
+              <select className={input} aria-label={`Rule ${i + 1} applies to language`} value={r.applyTo} onChange={(e) => patch(i, { applyTo: e.target.value })}>
                 {LANGS.map((l) => <option key={l} value={l}>{l === "all" ? "All" : l}</option>)}
               </select>
-              <Button variant="ghost" size="icon" className="hover:text-err" onClick={() => setRules((rs) => rs.filter((_, idx) => idx !== i))}><X className="size-4" /></Button>
+              <Button variant="ghost" size="icon" className="hover:text-err" aria-label={`Remove rule ${i + 1}`} onClick={() => removeRule(i, r)}><X className="size-4" /></Button>
             </div>
           ))}
         </div>
@@ -210,25 +244,41 @@ function Users() {
   const create = useCreateUser();
   const patch = usePatchUser();
   const del = useDeleteUser();
+  const toast = useToast();
+  const [confirm, confirmDialog] = useConfirm();
   const [email, setEmail] = useState(""); const [pw, setPw] = useState(""); const [name, setName] = useState("");
   if (users.isLoading) return <Loading />;
+
+  async function removeUser(u: { id: string; email: string; displayName?: string }) {
+    if (!(await confirm({
+      title: "Delete this user?",
+      message: `"${u.displayName || u.email}" will lose access immediately. Their jobs are not deleted. This can't be undone.`,
+      confirmLabel: "Delete user",
+    }))) return;
+    del.mutate(u.id, {
+      onSuccess: () => toast.success("User deleted."),
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Delete failed"),
+    });
+  }
+
   return (
     <div className="grid gap-4">
+      {confirmDialog}
       <div className="overflow-hidden rounded-xl border border-border">
         {users.data?.map((u, i) => (
           <div key={u.id} className={cn("flex items-center gap-3 bg-surface px-4 py-3", i > 0 && "border-t border-border")}>
             <div className="flex-1"><div className="font-medium">{u.displayName || u.email}</div><div className="font-mono text-xs text-faint">{u.email} · {u.provider}</div></div>
-            <span className="flex items-center gap-2 text-xs text-muted"><Switch checked={u.isAdmin} onCheckedChange={(v) => patch.mutate({ id: u.id, isAdmin: v })} aria-label="Admin" /> admin</span>
-            <Button variant="ghost" size="icon" className="hover:text-err" onClick={() => del.mutate(u.id)}><Trash2 className="size-4" /></Button>
+            <span className="flex items-center gap-2 text-xs text-muted"><Switch checked={u.isAdmin} onCheckedChange={(v) => patch.mutate({ id: u.id, isAdmin: v })} aria-label={`Admin — ${u.email}`} /> admin</span>
+            <Button variant="ghost" size="icon" className="hover:text-err" aria-label={`Delete user ${u.email}`} onClick={() => removeUser(u)}><Trash2 className="size-4" /></Button>
           </div>
         ))}
       </div>
-      <form className="rounded-xl border border-border bg-surface p-5" onSubmit={(e) => { e.preventDefault(); create.mutate({ email, password: pw, displayName: name }, { onSuccess: () => { setEmail(""); setPw(""); setName(""); } }); }}>
+      <form className="rounded-xl border border-border bg-surface p-5" onSubmit={(e) => { e.preventDefault(); create.mutate({ email, password: pw, displayName: name }, { onSuccess: () => { setEmail(""); setPw(""); setName(""); toast.success("User created."); }, onError: (err: unknown) => toast.error(err instanceof Error ? err.message : "Create failed") }); }}>
         <div className={eyebrow}>Create user</div>
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
-          <input className={input} placeholder="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          <input className={input} placeholder="Display name" value={name} onChange={(e) => setName(e.target.value)} />
-          <input className={input} placeholder="Password" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required />
+          <input className={input} placeholder="Email" aria-label="New user email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <input className={input} placeholder="Display name" aria-label="New user display name" value={name} onChange={(e) => setName(e.target.value)} />
+          <input className={input} placeholder="Password" aria-label="New user password" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required />
         </div>
         <Button variant="primary" size="sm" type="submit" className="mt-3" disabled={create.isPending}>Create</Button>
       </form>
@@ -300,6 +350,7 @@ function fmtRunTime(iso: string): string {
 function CleanupRuns() {
   const runs = useCleanupRuns();
   const run = useRunCleanup();
+  const toast = useToast();
   const [openRun, setOpenRun] = useState<CleanupRun | null>(null);
   return (
     <div className="rounded-xl border border-border bg-surface p-5">
@@ -309,7 +360,10 @@ function CleanupRuns() {
           <p className="mt-1 text-xs text-muted">Last 7 runs · rows with deletions open the file list.</p>
         </div>
         <Button variant="default" size="sm" disabled={run.isPending}
-          onClick={() => run.mutate(undefined, { onError: (e: unknown) => window.alert(e instanceof Error ? e.message : "Cleanup failed") })}>
+          onClick={() => run.mutate(undefined, {
+            onSuccess: (r: CleanupRun) => toast.success(`Cleanup finished — ${r.deleted} file${r.deleted === 1 ? "" : "s"} removed.`),
+            onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Cleanup failed"),
+          })}>
           {run.isPending ? <Spinner /> : <Play className="size-3.5" />} Run cleanup now
         </Button>
       </div>

@@ -20,18 +20,18 @@ export function PlayerControls({ player, className }: { player: SourcePlayer; cl
   return (
     <div className={cn("flex items-center gap-2.5 px-3 py-2", className)}>
       <button
-        type="button" onClick={() => seekBy(-5)} title="Back 5s (←)"
-        className="grid size-7 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-fg"
+        type="button" onClick={() => seekBy(-5)} title="Back 5s (←)" aria-label="Back 5 seconds"
+        className="grid size-10 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-text sm:size-7"
       ><SkipBack className="size-4" /></button>
 
       <button
-        type="button" onClick={toggle} title="Play / Pause (Space)"
-        className="grid size-9 place-items-center rounded-full bg-accent text-accent-foreground shadow transition hover:brightness-110"
+        type="button" onClick={toggle} title="Play / Pause (Space)" aria-label="Play or pause"
+        className="grid size-11 place-items-center rounded-full bg-accent text-accent-foreground shadow transition hover:brightness-110 sm:size-9"
       >{playing ? <Pause className="size-4" /> : <Play className="size-4 translate-x-px" />}</button>
 
       <button
-        type="button" onClick={() => seekBy(5)} title="Forward 5s (→)"
-        className="grid size-7 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-fg"
+        type="button" onClick={() => seekBy(5)} title="Forward 5s (→)" aria-label="Forward 5 seconds"
+        className="grid size-10 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-text sm:size-7"
       ><SkipForward className="size-4" /></button>
 
       <span className="ml-1 font-mono text-[11px] tabular-nums text-muted">{clock(currentTime)}</span>

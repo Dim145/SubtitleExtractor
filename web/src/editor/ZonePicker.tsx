@@ -40,7 +40,8 @@ function download(name: string, content: string) {
   const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
   const a = document.createElement("a");
   a.href = url; a.download = name; a.click();
-  URL.revokeObjectURL(url);
+  // Defer the revoke so the click-driven download isn't aborted.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** Pick subtitle zones over a playable preview, then extract on the server or in
@@ -161,8 +162,8 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
 
         <div className="p-5">
           <p className="mb-2 text-sm text-muted">{autoZone
-            ? "La zone des sous-titres est détectée automatiquement. Play/seek to preview the frame."
-            : "Draw up to 2 subtitle zones over the frame (or leave the default band). Play/seek to find a frame with subtitles."}</p>
+            ? "The subtitle zone is detected automatically. Play or seek to preview the frame."
+            : "Draw up to 2 subtitle zones over the frame (or leave the default band). Play or seek to find a frame with subtitles."}</p>
           <MediaStage
             player={player}
             stageRef={stageRef}
@@ -192,7 +193,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
                   aria-pressed={formats.has(f)}
                   className={cn(
                     "rounded-lg border px-2.5 py-1 text-xs font-semibold transition",
-                    formats.has(f) ? "border-accent bg-accent/15 text-accent" : "border-border-strong text-muted hover:border-accent/50 hover:text-fg",
+                    formats.has(f) ? "border-accent bg-accent/15 text-accent" : "border-border-strong text-muted hover:border-accent/50 hover:text-text",
                   )}
                 >{f.toUpperCase()}</button>
               ))}
@@ -209,7 +210,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
             </label>
           </div>
 
-          {autoZone && <p className="mt-2 text-xs text-faint">La zone des sous-titres est détectée automatiquement.</p>}
+          {autoZone && <p className="mt-2 text-xs text-faint">The subtitle zone is detected automatically.</p>}
 
           {progress && <div className="mt-3 text-xs text-muted"><span className="font-mono">{progress.pct}%</span> · {progress.stage}</div>}
         </div>

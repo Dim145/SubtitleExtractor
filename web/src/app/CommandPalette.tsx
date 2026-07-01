@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { LayoutGrid, Pencil, Settings, Plus, SunMoon, Search, LogOut } from "lucide-react";
 import { useTheme } from "@/lib/theme";
 import { useLogout } from "@/api/auth";
+import { useJobs } from "@/api/jobs";
 
 /** ⌘K command palette: navigation + quick actions. */
 export function CommandPalette() {
@@ -11,6 +12,9 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useLogout();
+  const jobs = useJobs();
+  // Most-recent job that has editable results, for the context-aware "Open editor".
+  const editableJob = jobs.data?.find((j) => j.status === "succeeded") ?? null;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -58,7 +62,11 @@ export function CommandPalette() {
             <Command.Empty className="px-3 py-6 text-center text-sm text-muted">No results.</Command.Empty>
             <Command.Group heading="Go to" className="px-1 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-faint [&_[cmdk-group-items]]:mt-1">
               <Item onSelect={() => run(() => navigate({ to: "/" }))} icon={<LayoutGrid className="size-4" />}>Dashboard</Item>
-              <Item onSelect={() => run(() => navigate({ to: "/jobs/$id/editor", params: { id: "demo" } }))} icon={<Pencil className="size-4" />}>Open editor</Item>
+              {editableJob && (
+                <Item onSelect={() => run(() => navigate({ to: "/jobs/$id/editor", params: { id: editableJob.id } }))} icon={<Pencil className="size-4" />}>
+                  Open editor <span className="ml-auto max-w-[45%] truncate text-xs text-faint">{editableJob.sourceFilename}</span>
+                </Item>
+              )}
               <Item onSelect={() => run(() => navigate({ to: "/admin" }))} icon={<Settings className="size-4" />}>Administration</Item>
             </Command.Group>
             <Command.Group heading="Actions" className="px-1 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-faint [&_[cmdk-group-items]]:mt-1">

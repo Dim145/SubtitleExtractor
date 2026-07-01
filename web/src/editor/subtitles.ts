@@ -117,11 +117,27 @@ export function parseSRT(text: string): ParsedSubs {
   return { cues, width: 1280, height: 720 };
 }
 
+// Default field order for the [Events] section (the ASS spec order, and what
+// this app emits). Used when a file has no `Format:` line to read.
+const DEFAULT_EVENT_FIELDS = ["Layer", "Start", "End", "Style", "Name", "MarginL", "MarginR", "MarginV", "Effect", "Text"];
+
+/**
+ * Parse ASS. Field positions in a Dialogue line are defined by the `Format:`
+ * line inside `[Events]`, which is NOT always the canonical order — so we read
+ * it and map field name → index (falling back to the default order if absent).
+ *
+ * Import limitation: rich ASS (animation, karaoke, per-event styling) is reduced
+ * to text + \an alignment. Round-tripping this app's own output is exact.
+ */
 export function parseASS(text: string): ParsedSubs {
   const lines = text.replace(/\r/g, "").split("\n");
   let width = 1280;
   let height = 720;
   const cues: Cue[] = [];
+
+  // Field-name → column index for Dialogue lines, from the [Events] Format line.
+  let fields = DEFAULT_EVENT_FIELDS;
+  let inEvents = false;
 
   for (const line of lines) {
     const resX = line.match(/^PlayResX:\s*(\d+)/i);
@@ -129,17 +145,37 @@ export function parseASS(text: string): ParsedSubs {
     const resY = line.match(/^PlayResY:\s*(\d+)/i);
     if (resY) height = parseInt(resY[1], 10);
 
+    // Section headers (e.g. "[Events]", "[V4+ Styles]"): only the Events Format
+    // line describes Dialogue columns.
+    const section = line.match(/^\[([^\]]+)\]/);
+    if (section) { inEvents = /events/i.test(section[1]); continue; }
+
+    if (inEvents && /^Format:/i.test(line)) {
+      fields = line.slice(line.indexOf(":") + 1).split(",").map((f) => f.trim());
+      continue;
+    }
+
     if (line.startsWith("Dialogue:")) {
-      // Dialogue: Layer,Start,End,Style,Name,ML,MR,MV,Effect,Text
+      const idxOf = (name: string, fallback: number) => {
+        const i = fields.findIndex((f) => f.toLowerCase() === name.toLowerCase());
+        return i >= 0 ? i : fallback;
+      };
+      const startIdx = idxOf("Start", 1);
+      const endIdx = idxOf("End", 2);
+      const nameIdx = idxOf("Name", 4);
+      const textIdx = idxOf("Text", fields.length - 1);
+
       const rest = line.slice("Dialogue:".length);
+      // Text is always the last field and may itself contain commas, so split
+      // only up to the text column, then re-join the remainder as the text.
       const parts = rest.split(",");
-      if (parts.length < 10) continue;
-      const start = parseAssStamp(parts[1]);
-      const end = parseAssStamp(parts[2]);
-      // Name field (parts[4]) optionally carries the OCR mean line score 0..1.
-      const conf = parseFloat(parts[4]);
+      if (parts.length <= textIdx) continue;
+      const start = parseAssStamp(parts[startIdx]);
+      const end = parseAssStamp(parts[endIdx]);
+      // Name field optionally carries the OCR mean line score 0..1.
+      const conf = parseFloat(parts[nameIdx]);
       const confidence = Number.isFinite(conf) && conf >= 0 && conf <= 1 ? conf : undefined;
-      const rawText = parts.slice(9).join(",");
+      const rawText = parts.slice(textIdx).join(",");
       const anMatch = rawText.match(/\\an([1-9])/);
       const an = anMatch ? parseInt(anMatch[1], 10) : 2;
       const clean = rawText

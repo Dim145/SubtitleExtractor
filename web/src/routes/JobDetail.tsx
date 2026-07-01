@@ -9,6 +9,7 @@ import { StatusBadge, ProgressBar } from "@/components/StatusBadge";
 import { subtitleFilename, formatBytes } from "@/lib/format";
 import { downloadableUrl } from "@/lib/url";
 import { cn } from "@/lib/cn";
+import { useToast } from "@/components/ui/toast";
 
 const ACTIVE = ["queued", "claimed", "running"];
 
@@ -17,20 +18,25 @@ export function JobDetail() {
   const navigate = useNavigate();
   const { data: job, isLoading } = useJob(id);
   const results = useJobResults(id);
-  const logs = useJobEvents(id);
+  // Pass the job status as the SSE token so a re-run (succeeded → queued/running)
+  // re-opens the live log stream instead of leaving it frozen on "done".
+  const logs = useJobEvents(id, job?.status);
   const delResult = useDeleteResult(id);
   const rerun = useRerunJob(id);
   const delVideo = useDeleteVideo(id);
+  const toast = useToast();
 
   function doRerun() {
     rerun.mutate(undefined, {
-      onError: (e: unknown) => window.alert(e instanceof Error ? e.message : "Re-run failed"),
+      onSuccess: () => toast.success("Re-run queued."),
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Re-run failed"),
     });
   }
   function removeVideo() {
     if (!window.confirm("Delete the source video? Your subtitles are kept, but you won't be able to re-run or preview this job's video.")) return;
     delVideo.mutate(undefined, {
-      onError: (e: unknown) => window.alert(e instanceof Error ? e.message : "Failed to delete video"),
+      onSuccess: () => toast.success("Source video deleted."),
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Failed to delete video"),
     });
   }
 
@@ -45,12 +51,21 @@ export function JobDetail() {
   // Download via the presigned URL; if that's unreachable (non-public bucket,
   // S3 signature/clock-skew), fall back to streaming through the API.
   async function downloadResult(r: { id: string; downloadUrl: string }, filename: string) {
-    const res = await fetch(downloadableUrl(r.downloadUrl, `/api/jobs/${id}/results/${r.id}/download`), { credentials: "include" });
-    const blob = await res.blob();
-    const u = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = u; a.download = filename; a.click();
-    URL.revokeObjectURL(u);
+    let u: string | null = null;
+    try {
+      const res = await fetch(downloadableUrl(r.downloadUrl, `/api/jobs/${id}/results/${r.id}/download`), { credentials: "include" });
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const blob = await res.blob();
+      u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u; a.download = filename; a.click();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Download failed");
+    } finally {
+      // Defer revoke so the click-driven download isn't aborted (some browsers
+      // fetch the blob asynchronously after the click handler returns).
+      if (u) { const url = u; setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    }
   }
 
   const logRef = useRef<HTMLDivElement>(null);
@@ -81,6 +96,12 @@ export function JobDetail() {
           <div className="mt-1.5 font-mono text-xs text-muted">{job.progressPct}% · {job.progressStage ?? "working"}</div>
         </>
       )}
+      {/* Screen-reader mirror of progress + terminal state (visually hidden). */}
+      <div aria-live="polite" className="sr-only">
+        {active
+          ? `${job.progressPct}% · ${job.progressStage ?? "working"}`
+          : `Job ${job.status}.`}
+      </div>
       {job.status === "failed" && job.errorMessage && (
         <p className="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{job.errorMessage}</p>
       )}
@@ -115,7 +136,7 @@ export function JobDetail() {
       <div className="mt-6 grid gap-4 md:grid-cols-[1.4fr_1fr]">
         <section className="animate-in rounded-xl border border-border bg-surface p-4" style={{ animationDelay: "60ms" }}>
           <div className="mb-2.5 text-[11px] font-bold uppercase tracking-[0.12em] text-faint">Live log</div>
-          <div ref={logRef} className="max-h-72 overflow-auto rounded-lg border border-border bg-[#05070d] p-3 font-mono text-xs leading-relaxed">
+          <div ref={logRef} aria-live="polite" aria-label="Live log output" role="log" className="max-h-72 overflow-auto rounded-lg border border-border bg-[#05070d] p-3 font-mono text-xs leading-relaxed">
             {logs.length === 0 ? (
               <span className="text-faint">No log output yet…</span>
             ) : (
