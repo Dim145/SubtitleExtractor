@@ -33,6 +33,8 @@ export interface ClientExtractOptions {
   fps?: number;
   zones?: Zone[];
   minConfidence?: number;
+  /** When true, the subtitle zone is detected automatically (consumed later). */
+  autoZone?: boolean;
 }
 
 export interface ClientExtractResult {

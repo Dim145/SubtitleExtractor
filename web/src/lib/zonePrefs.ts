@@ -39,3 +39,18 @@ export function loadLang(): string {
 export function saveLang(lang: string): void {
   try { localStorage.setItem(LANG_KEY, lang); } catch { /* storage may be disabled */ }
 }
+
+// Remember whether the subtitle zone is auto-detected (default) or drawn by hand.
+const AUTOZONE_KEY = "subext.autozone.v1";
+
+export function loadAutoZone(): boolean {
+  try {
+    const raw = localStorage.getItem(AUTOZONE_KEY);
+    if (raw === null) return true; // default: auto
+    return raw === "1" || raw === "true";
+  } catch { return true; }
+}
+
+export function saveAutoZone(b: boolean): void {
+  try { localStorage.setItem(AUTOZONE_KEY, b ? "1" : "0"); } catch { /* storage may be disabled */ }
+}

@@ -68,7 +68,7 @@ def is_loaded() -> bool:
 
 
 def unload_all() -> int:
-    """Free all loaded backends (releases GPU/VRAM). Returns how many were freed."""
+    """Free all loaded backends + detectors (releases GPU/VRAM). Returns the count."""
     n = len(_cache)
     for backend in list(_cache.values()):
         try:
@@ -76,5 +76,11 @@ def unload_all() -> int:
         except Exception:  # noqa: BLE001
             pass
     _cache.clear()
+    try:
+        from .detector import unload_detectors
+
+        n += unload_detectors()
+    except Exception:  # noqa: BLE001
+        pass
     gc.collect()
     return n

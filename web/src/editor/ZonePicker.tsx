@@ -7,10 +7,11 @@ import { webGpuAvailable, webCodecsAvailable } from "@/clientside/_caps";
 import type { Zone } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { useDialog } from "@/components/ui/useDialog";
 import { subtitleFilename } from "@/lib/format";
 import { cn } from "@/lib/cn";
-import { loadZones, saveZones, loadLang, saveLang } from "@/lib/zonePrefs";
+import { loadZones, saveZones, loadLang, saveLang, loadAutoZone, saveAutoZone } from "@/lib/zonePrefs";
 
 // OCR language hint sent to the server job ("" = auto-detect).
 const LANGUAGES: { code: string; label: string }[] = [
@@ -70,6 +71,8 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   // Zone layout is remembered across extractions (localStorage).
   const [zones, setZones] = useState<Zone[]>(loadZones);
   useEffect(() => { saveZones(zones); }, [zones]);
+  const [autoZone, setAutoZone] = useState<boolean>(loadAutoZone);
+  useEffect(() => { saveAutoZone(autoZone); }, [autoZone]);
   const [language, setLanguage] = useState<string>(loadLang);
   useEffect(() => { saveLang(language); }, [language]);
   const [formats, setFormats] = useState<Set<Fmt>>(new Set<Fmt>(["srt", "ass"]));
@@ -83,7 +86,11 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
     form.append("file", file);
     form.append("formats", [...formats].join(","));
     if (language) form.append("language", language);
-    if (zones.length) form.append("zones", JSON.stringify(zones));
+    if (autoZone) {
+      form.append("auto_zone", "true");
+    } else if (zones.length) {
+      form.append("zones", JSON.stringify(zones));
+    }
     create.mutate(form, { onSuccess: () => { onClose(); navigate({ to: "/" }); } });
   }
 
@@ -94,7 +101,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
     setProgress({ pct: 0, stage: "starting" });
     try {
       const { extractInBrowser } = await import("@/clientside/clientOcr");
-      const res = await extractInBrowser(file, { zones, fps: 4 }, (pct, stage) => setProgress({ pct, stage }));
+      const res = await extractInBrowser(file, { zones, autoZone, fps: 4 }, (pct, stage) => setProgress({ pct, stage }));
       for (const f of formats) {
         const body = f === "srt" ? toSRT(res.cues) : f === "ass" ? toASS(res.cues, res.width, res.height) : toVTT(res.cues);
         download(subtitleFilename(file.name, f), body);
@@ -122,7 +129,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
   const stageW = stageRef.current?.clientWidth || 0;
   const stageH = stageRef.current?.clientHeight || 0;
 
-  const zoneOverlay = ready && stageW > 0 ? zones.map((z, i) => (
+  const zoneOverlay = !autoZone && ready && stageW > 0 ? zones.map((z, i) => (
     <Rnd
       key={i}
       bounds="parent"
@@ -153,7 +160,9 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
         </div>
 
         <div className="p-5">
-          <p className="mb-2 text-sm text-muted">Draw up to 2 subtitle zones over the frame (or leave the default band). Play/seek to find a frame with subtitles.</p>
+          <p className="mb-2 text-sm text-muted">{autoZone
+            ? "La zone des sous-titres est détectée automatiquement. Play/seek to preview the frame."
+            : "Draw up to 2 subtitle zones over the frame (or leave the default band). Play/seek to find a frame with subtitles."}</p>
           <MediaStage
             player={player}
             stageRef={stageRef}
@@ -169,7 +178,13 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
           />
 
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-3">
-            <Button variant="default" size="sm" disabled={zones.length >= 2} onClick={() => setZones((z) => [...z, { x: 0.3, y: 0.1, w: 0.4, h: 0.14 }])}><Plus className="size-3.5" /> Add zone</Button>
+            <label className="flex items-center gap-2 text-sm text-muted">
+              <Switch checked={autoZone} onCheckedChange={setAutoZone} id="autozone" aria-label="Zone auto" />
+              <span>Zone auto</span>
+            </label>
+            {!autoZone && (
+              <Button variant="default" size="sm" disabled={zones.length >= 2} onClick={() => setZones((z) => [...z, { x: 0.3, y: 0.1, w: 0.4, h: 0.14 }])}><Plus className="size-3.5" /> Add zone</Button>
+            )}
             <div className="flex items-center gap-1.5">
               {FORMATS.map((f) => (
                 <button
@@ -193,6 +208,8 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
               </select>
             </label>
           </div>
+
+          {autoZone && <p className="mt-2 text-xs text-faint">La zone des sous-titres est détectée automatiquement.</p>}
 
           {progress && <div className="mt-3 text-xs text-muted"><span className="font-mono">{progress.pct}%</span> · {progress.stage}</div>}
         </div>

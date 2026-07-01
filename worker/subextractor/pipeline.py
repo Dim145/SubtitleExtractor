@@ -98,6 +98,9 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         "min_confidence": min_conf,
         "language": language,
         "zones": params.get("zones") or wcfg.get("zones"),
+        # Auto-detect the subtitle band(s) via DBNet when set and no explicit
+        # zones are given; otherwise fall back to the fixed bottom band.
+        "auto_zone": bool(_pick(params, wcfg, "auto_zone", False)),
         "decoder": _pick(params, wcfg, "decoder", None),
         "hwaccel": _pick(params, wcfg, "hwaccel", None),
         # RapidOCR model selection + detection tuning (recall/precision).
@@ -119,6 +122,14 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         "target_text_height": float(_pick(params, wcfg, "target_text_height", 40.0)),
         "max_scale": float(_pick(params, wcfg, "max_scale", 4.0)),
         # Gating + merge.
+        # DBNet detector as the presence gate (recall win over edge density: it
+        # catches faint / short cues the edge heuristic misses). When off, fall
+        # back to the edge-density gate below.
+        "use_detector_gate": bool(_pick(params, wcfg, "use_detector_gate", True)),
+        # limit_type="max" keeps det ~25ms on wide-short subtitle bands ("min"
+        # upscales the short side and explodes the wide side to 400-600ms).
+        "detector_limit_type": _pick(params, wcfg, "detector_limit_type", "max"),
+        "detector_limit_side_len": int(_pick(params, wcfg, "detector_limit_side_len", 736)),
         "text_presence_threshold": float(_pick(params, wcfg, "text_presence_threshold", 0.008)),
         "change_threshold": float(_pick(params, wcfg, "change_threshold", 0.01)),
         # Also re-OCR when text-edge density (presence) jumps by this relative
@@ -136,6 +147,9 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         "char_voting": bool(_pick(params, wcfg, "char_voting", True)),
         # Drop cues whose script doesn't match a Latin job (VLM CJK hallucinations).
         "drop_foreign_script": bool(_pick(params, wcfg, "drop_foreign_script", True)),
+        # Drop cues spanning most of the video — permanent overlays (watermark/
+        # logo), never real subtitles. Guards auto-zone + wide manual zones.
+        "drop_permanent": bool(_pick(params, wcfg, "drop_permanent", True)),
         # Best-frame re-OCR within a stable group (sharper frame → better read).
         # Off by default: it roughly triples OCR cost and its accuracy benefit is
         # unproven on this content — enable + measure with the eval harness before
@@ -187,6 +201,114 @@ def _resolve_zones(zones: Any, width: int, height: int) -> list[tuple[int, int, 
         y = int(height * 0.62)
         rects.append((0, y, width, height - y))
     return rects
+
+
+def auto_detect_zones(video_path: str, info: VideoInfo, cfg: dict) -> list[dict] | None:
+    """Discover the subtitle band(s) by running the DBNet detector on a sparse
+    set of FULL frames and clustering the detected boxes into horizontal bands.
+
+    Samples ~1 frame every 3s (capped at ~15), runs the detector on each full
+    frame, collects every box's normalized y-center / height / x-extent, then
+    does a lightweight 1D clustering on y-centers (tolerance ~ median box
+    height). Clusters supported by a reasonable fraction of sampled frames are
+    kept (densest bottom band + optionally a top band, max 2) and emitted as
+    normalized zone dicts {x, y, w, h} spanning the cluster's x-extent (with a
+    small horizontal margin) and y-band (with vertical padding).
+
+    Returns None when nothing solid is found (caller falls back to the default
+    bottom band)."""
+    from .backends.detector import get_detector
+
+    W, H = info.width, info.height
+    if W <= 0 or H <= 0:
+        return None
+
+    # Sparse sampling: ~one frame every 3s, at least a few, capped so this stays
+    # a quick pre-pass (full-frame det is ~25ms with limit_type="max").
+    duration = max(1.0, info.duration)
+    n_samples = int(min(15, max(4, duration / 3.0)))
+    sample_fps = n_samples / duration
+
+    detector = get_detector(
+        ocr_version=cfg.get("ocr_version") or "PP-OCRv5",
+        det_model_type=cfg.get("det_model_type") or "mobile",
+        limit_type=cfg.get("detector_limit_type") or "max",
+        limit_side_len=int(cfg.get("detector_limit_side_len", 736)),
+    )
+
+    # Each detected box → normalized (y_center, height, x1, x2).
+    boxes: list[tuple[float, float, float, float]] = []
+    n_frames = 0
+    for sf in sample_frames_auto(video_path, sample_fps, cfg.get("decoder"), cfg.get("hwaccel")):
+        n_frames += 1
+        for (x1, y1, x2, y2) in detector.detect_boxes(sf.image):
+            if x2 <= x1 or y2 <= y1:
+                continue
+            yc = ((y1 + y2) / 2.0) / H
+            bh = (y2 - y1) / H
+            boxes.append((yc, bh, x1 / W, x2 / W))
+        if n_frames >= n_samples + 2:  # guard against fps rounding overshoot
+            break
+
+    if n_frames == 0 or not boxes:
+        return None
+
+    # 1D clustering on y-centers: sort, then greedily group neighbors within a
+    # tolerance derived from the median box height.
+    boxes.sort(key=lambda b: b[0])
+    heights = sorted(b[1] for b in boxes)
+    med_h = heights[len(heights) // 2] or 0.02
+    tol = max(med_h, 0.02)
+
+    clusters: list[list[tuple[float, float, float, float]]] = []
+    cur: list[tuple[float, float, float, float]] = []
+    last_yc = None
+    for b in boxes:
+        if last_yc is None or (b[0] - last_yc) <= tol:
+            cur.append(b)
+        else:
+            clusters.append(cur)
+            cur = [b]
+        last_yc = b[0]
+    if cur:
+        clusters.append(cur)
+
+    # Keep clusters supported by a reasonable fraction of sampled frames. A band
+    # is only "real" if it recurs across the clip, not a one-off caption.
+    min_support = max(2, int(round(0.2 * n_frames)))
+    kept = [c for c in clusters if len(c) >= min_support]
+    if not kept:
+        return None
+
+    # Prefer the densest bands; keep at most 2 (typically a bottom band, plus an
+    # optional second band such as a top caption).
+    kept.sort(key=lambda c: len(c), reverse=True)
+    kept = kept[:2]
+
+    zones: list[dict] = []
+    for c in kept:
+        ycs = [b[0] for b in c]
+        bhs = [b[1] for b in c]
+        x1s = [b[2] for b in c]
+        x2s = [b[3] for b in c]
+        band_h = max(bhs)
+        y_top = min(ycs) - band_h / 2.0
+        y_bot = max(ycs) + band_h / 2.0
+        # Vertical padding so cropping doesn't clip ascenders/descenders / a
+        # second wrapped line of the same subtitle.
+        pad_v = max(band_h, 0.04)
+        y = max(0.0, y_top - pad_v)
+        h = min(1.0 - y, (y_bot - y_top) + 2 * pad_v)
+        # Horizontal extent with a small margin.
+        x = max(0.0, min(x1s) - 0.02)
+        w = min(1.0 - x, (max(x2s) - min(x1s)) + 0.04)
+        if h <= 0 or w <= 0:
+            continue
+        zones.append({"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)})
+
+    # Order top→bottom for stable/readable logging + zone indices.
+    zones.sort(key=lambda z: z["y"])
+    return zones or None
 
 
 def _order_text(lines: list) -> str:
@@ -250,6 +372,19 @@ def extract_cues(
     max_ocr_grp = int(cfg.get("max_ocr_per_group", 3))
     pres_change_thr = float(cfg.get("presence_change_threshold", 0.15))
 
+    # Presence gate: a DBNet detector (recall win) or the edge-density heuristic.
+    use_det_gate = bool(cfg.get("use_detector_gate", True))
+    detector = None
+    if use_det_gate:
+        from .backends.detector import get_detector
+
+        detector = get_detector(
+            ocr_version=cfg.get("ocr_version") or "PP-OCRv5",
+            det_model_type=cfg.get("det_model_type") or "mobile",
+            limit_type=cfg.get("detector_limit_type") or "max",
+            limit_side_len=int(cfg.get("detector_limit_side_len", 736)),
+        )
+
     def _ocr(crop: np.ndarray, mask: np.ndarray) -> list:
         """OCR a crop, scaling it toward the target glyph height (capped)."""
         scale = min(max_scale, upscale)  # fallback when height can't be estimated
@@ -263,7 +398,22 @@ def extract_cues(
         return backend.recognize(img)
 
     info = probe(video_path)
-    zones = _resolve_zones(cfg.get("zones"), info.width, info.height)
+    # Auto-zone: when enabled and no explicit zones were given, discover the
+    # subtitle band(s) via DBNet; on success feed them through the same
+    # _resolve_zones path as explicit zones, else fall back to the default band.
+    zone_spec = cfg.get("zones")
+    if cfg.get("auto_zone") and not zone_spec:
+        detected = auto_detect_zones(video_path, info, cfg)
+        if detected:
+            zone_spec = detected
+            if log:
+                bands = ", ".join(
+                    f"y={z['y']:.2f}-{z['y'] + z['h']:.2f}" for z in detected
+                )
+                log(f"auto-zone: {len(detected)} band(s) at {bands}")
+        elif log:
+            log("auto-zone: fell back to default band")
+    zones = _resolve_zones(zone_spec, info.width, info.height)
     est_total = max(1, int(info.duration * sample_fps))
     frame_interval = 1.0 / sample_fps  # replaced by the decoder's REAL interval below
     if log:
@@ -287,9 +437,18 @@ def extract_cues(
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
             mask = text_mask(gray)
             fg = float(np.count_nonzero(mask)) / max(1, mask.size)
+            # text_presence is still needed by the change-detection presence-delta
+            # trigger below, so compute it regardless of which gate is active.
             pres = text_presence(gray)
 
-            if fg < _MIN_FG_RATIO or pres < presence_thr:
+            # Presence gate. Detector: text present iff DBNet finds >=1 box (proper
+            # recall on faint/short cues). Fallback: the edge-density heuristic.
+            if detector is not None:
+                present = detector.detect(crop) >= 1
+            else:
+                present = not (fg < _MIN_FG_RATIO or pres < presence_thr)
+
+            if not present:
                 lines = []  # no text-like content → skip OCR (avoids hallucinations)
                 grp_best[zi], grp_ocr[zi] = 0.0, 0
             else:
@@ -343,6 +502,11 @@ def extract_cues(
     # Latin job → drop foreign-script hallucinations (e.g. a VLM emitting CJK).
     if cfg.get("drop_foreign_script", True) and cfg.get("rec_lang") == "latin":
         cues = [c for c in cues if non_latin_ratio(c.text) <= 0.4]
+    # Drop permanent overlays (watermark/logo/station ID): a real subtitle never
+    # spans most of the video. Catches e.g. a "HentaiVOST.FR" watermark that
+    # auto-zone clustering or a wide manual zone picks up as one long cue.
+    if cfg.get("drop_permanent", True) and info.duration > 0:
+        cues = [c for c in cues if not ((c.end - c.start) > 12.0 and (c.end - c.start) > 0.5 * info.duration)]
     return cues, info
 
 

@@ -102,6 +102,11 @@ func buildParams(fields map[string]string) json.RawMessage {
 			params["formats"] = formats
 		}
 	}
+	// auto_zone: when set (and no explicit zones), the worker auto-detects the
+	// subtitle band(s) instead of using the fixed bottom band.
+	if v := fields["auto_zone"]; v == "true" || v == "1" {
+		params["auto_zone"] = true
+	}
 	// zones: JSON array of normalized rects [{x,y,w,h}] (0..1), up to 2.
 	if v := fields["zones"]; v != "" {
 		var zones []map[string]float64
