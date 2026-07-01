@@ -101,7 +101,7 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
     setProgress({ pct: 0, stage: "starting" });
     try {
       const { extractInBrowser } = await import("@/clientside/clientOcr");
-      const res = await extractInBrowser(file, { zones, autoZone, fps: 4 }, (pct, stage) => setProgress({ pct, stage }));
+      const res = await extractInBrowser(file, { zones, autoZone, fps: 4, language }, (pct, stage) => setProgress({ pct, stage }));
       for (const f of formats) {
         const body = f === "srt" ? toSRT(res.cues) : f === "ass" ? toASS(res.cues, res.width, res.height) : toVTT(res.cues);
         download(subtitleFilename(file.name, f), body);

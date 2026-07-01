@@ -21,7 +21,8 @@ RUN apk add --no-cache curl \
  && DB=https://raw.githubusercontent.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr-models/main \
  && curl -fsSL "$MB/detection/ort/PP-OCRv6_small_det.ort"                            -o public/models/PP-OCRv6_small_det.ort \
  && curl -fsSL "$MB/recognition/multi/latin/v5/latin_PP-OCRv5_mobile_rec_infer.onnx" -o public/models/latin_PP-OCRv5_mobile_rec_infer.onnx \
- && curl -fsSL "$DB/recognition/multi/latin/v5/ppocrv5_latin_dict.txt"               -o public/models/ppocrv5_latin_dict.txt
+ && curl -fsSL "$DB/recognition/multi/latin/v5/ppocrv5_latin_dict.txt"               -o public/models/ppocrv5_latin_dict.txt \
+ && curl -fsSL "https://cdn.jsdelivr.net/npm/an-array-of-french-words/index.json"    -o public/models/fr_words.txt
 RUN npm run build
 
 FROM nginx:1.27-alpine

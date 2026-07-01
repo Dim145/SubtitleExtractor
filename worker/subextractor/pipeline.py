@@ -38,6 +38,7 @@ from .dedup import (
     text_presence,
 )
 from .formats import write_ass, write_srt, write_vtt
+from .normalize_fr import get_french_words, is_french, normalize_line
 from .video import VideoInfo, probe, sample_frames_auto
 
 # Built-in fallbacks when neither the job nor the worker config specify a value.
@@ -145,6 +146,10 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         "min_gap": float(_pick(params, wcfg, "min_gap", 1.0)),
         "drop_junk": bool(_pick(params, wcfg, "drop_junk", True)),
         "char_voting": bool(_pick(params, wcfg, "char_voting", True)),
+        # French-only deterministic post-OCR normalizer (restore elision
+        # apostrophes, split run-together words). Wordlist-validated → no
+        # regressions; applied only to French jobs. See normalize_fr.py.
+        "normalize_text": bool(_pick(params, wcfg, "normalize_text", True)),
         # Drop cues whose script doesn't match a Latin job (VLM CJK hallucinations).
         "drop_foreign_script": bool(_pick(params, wcfg, "drop_foreign_script", True)),
         # Drop cues spanning most of the video — permanent overlays (watermark/
@@ -507,6 +512,14 @@ def extract_cues(
     # auto-zone clustering or a wide manual zone picks up as one long cue.
     if cfg.get("drop_permanent", True) and info.duration > 0:
         cues = [c for c in cues if not ((c.end - c.start) > 12.0 and (c.end - c.start) > 0.5 * info.duration)]
+    # French-only deterministic normalizer: restore elision apostrophes and
+    # split run-together words the OCR recognizer glued (wordlist-validated, so
+    # it never rewrites valid words or introduces regressions).
+    if cfg.get("normalize_text", True) and is_french(cfg.get("language")):
+        words = get_french_words()
+        if words:
+            for c in cues:
+                c.text = normalize_line(c.text, words)
     return cues, info
 
 

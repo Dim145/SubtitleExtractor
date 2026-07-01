@@ -31,9 +31,41 @@ const MODEL = {
 };
 import type { Cue } from "../editor/subtitles";
 import { FrameDecoder } from "../editor/decodeFrame";
+import { isFrench, normalizeLine } from "./normalizeFr";
 
 export function webGpuAvailable(): boolean {
   return typeof navigator !== "undefined" && "gpu" in navigator;
+}
+
+// French validation lexicon (~336k inflected forms), self-hosted at
+// /models/fr_words.txt (mirrors the OCR models — CSP/COEP forbid runtime
+// third-party fetch). Fetched ONCE, lazily, only for French jobs; parsed into a
+// lowercased Set and cached module-level. On any failure we return null so the
+// caller skips normalization instead of guessing — never blocks extraction.
+let _frWords: Set<string> | null = null;
+let _frWordsAttempted = false;
+async function getFrenchWords(): Promise<Set<string> | null> {
+  if (_frWords !== null || _frWordsAttempted) return _frWords;
+  _frWordsAttempted = true;
+  try {
+    const res = await fetch(new URL("/models/fr_words.txt", location.href).href);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = await res.text();
+    const arr: string[] = raw.trimStart().startsWith("[")
+      ? JSON.parse(raw)
+      : raw.split(/\r?\n/);
+    const set = new Set<string>();
+    for (const w of arr) {
+      const t = w.trim().toLowerCase();
+      if (t) set.add(t);
+    }
+    _frWords = set;
+    console.info(`[clientOcr] loaded ${set.size} French words for normalization`);
+  } catch (e) {
+    console.warn("[clientOcr] no French wordlist; normalization disabled:", e);
+    _frWords = null;
+  }
+  return _frWords;
 }
 
 export interface ClientExtractOptions {
@@ -42,6 +74,8 @@ export interface ClientExtractOptions {
   minConfidence?: number;
   /** When true, the subtitle zone is detected automatically (consumed later). */
   autoZone?: boolean;
+  /** OCR language hint; enables French residual normalization when French. */
+  language?: string;
 }
 
 export interface ClientExtractResult {
@@ -497,6 +531,16 @@ export async function extractInBrowser(
   // AND > 0.5 * video-duration. Guards auto-zone + wide manual zones.
   if (duration > 0) {
     cues = cues.filter((c) => !((c.end - c.start) > 12 && (c.end - c.start) > 0.5 * duration));
+  }
+
+  // French OCR-residual normalization (server parity, pipeline.py: applied after
+  // the permanence filter, French-only, default on). Restores elision
+  // apostrophes ("jai" -> "j'ai") and inter-word spaces ("pastrop" -> "pas
+  // trop"). Wordlist-gated + non-shortening, so it can't introduce regressions;
+  // if the wordlist can't be loaded, cues pass through unchanged.
+  if (isFrench(opts.language)) {
+    const words = await getFrenchWords();
+    if (words) for (const c of cues) c.text = normalizeLine(c.text, words);
   }
 
   dec.destroy();
