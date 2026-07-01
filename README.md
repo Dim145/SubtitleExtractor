@@ -85,9 +85,42 @@ GPU): `brew install ffmpeg && cd worker && ./run-macos.sh`.
 
 The API runs database migrations automatically on startup.
 
+## Production notes
+
+- **Datastore ports are loopback-only.** In `docker-compose.yml`, `postgres`
+  (5432), `minio` (9000/9001) and `api` (8080) are published on `127.0.0.1`
+  only — reachable from the host, not the public network. Only `web` (the
+  intended entrypoint) is published broadly.
+- **Put a TLS reverse proxy in front of `web`.** The compose stack serves plain
+  HTTP; terminate TLS with nginx/Caddy/Traefik ahead of the `web` service.
+- Resource limits on `api`/`web` in compose are conservative defaults — tune
+  `deploy.resources.limits` to your host. The OCR worker runs outside compose.
+
+## Backup & restore
+
+The recovery path is the **database + object store**, not the source videos: the
+video-retention cron deletes uploaded source videos on a schedule (admin-
+configurable, default ~7 days), so once a video ages out it is gone — the
+extracted subtitles and job metadata in Postgres/MinIO are what you restore.
+
+Back up the two data volumes (`pgdata`, `miniodata`):
+
+```bash
+# PostgreSQL — logical dump (restore with `psql` or `pg_restore`)
+docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql
+
+# MinIO — mirror the bucket to a local/offsite path with the mc client
+docker compose exec -T minio sh -c \
+  'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" \
+   && mc mirror --overwrite local/'"${STORAGE_S3_BUCKET:-subext}"' /data/backup'
+```
+
+To restore: recreate the volumes, `psql < backup.sql`, and `mc mirror` the
+saved bucket contents back into `local/<bucket>`.
+
 ## Tech stack
 
-- **API:** Go, chi, pgx, River (job queue), coreos/go-oidc, argon2id, minio-go
+- **API:** Go, chi, pgx, Postgres-backed queue (`FOR UPDATE SKIP LOCKED`), coreos/go-oidc, argon2id, minio-go
 - **DB:** PostgreSQL 16
 - **Worker:** Python — ffmpeg + RapidOCR / PP-OCRv5 / PaddleOCR-VL (configurable)
 - **Frontend:** React + Vite + TypeScript; ass-compiler, JASSUB, wavesurfer.js

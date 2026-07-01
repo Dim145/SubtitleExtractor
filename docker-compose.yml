@@ -3,6 +3,18 @@
 # (see worker/run-macos.sh) and is NOT part of this compose file, because Docker
 # on macOS cannot reach the Apple GPU.
 # Phase 2: the NVIDIA worker is added via docker-compose.nvidia.yml (overlay).
+#
+# PRODUCTION NOTES
+# ----------------
+# * Datastore/API ports (postgres 5432, minio 9000/9001, api 8080) are published
+#   on 127.0.0.1 only — reachable from the host, NOT the public network. Do not
+#   change these to a broad bind unless you front them with a firewall/proxy.
+# * `web` is the intended entrypoint and is the only broadly-published service.
+#   In production, put a TLS-terminating reverse proxy (nginx/Caddy/Traefik) in
+#   front of `web` — this compose file serves plain HTTP.
+# * Resource limits below (deploy.resources.limits) are conservative defaults;
+#   tune mem/cpus to your host. The OCR worker runs OUTSIDE compose (native
+#   macOS host, or the NVIDIA overlay) and is sized separately.
 
 services:
   postgres:
@@ -19,7 +31,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Loopback-only: the DB must not be reachable on the public network.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -38,8 +51,9 @@ services:
     volumes:
       - miniodata:/data
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # web console
+      # Loopback-only: object store + admin console are not public-facing.
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # web console
     healthcheck:
       # The minio binary serves a liveness endpoint; curl is bundled in the image.
       test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
@@ -77,10 +91,19 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      # Loopback-only: the API is reached through `web`'s /api proxy, not
+      # directly from the public network.
+      - "127.0.0.1:8080:8080"
     volumes:
       # Used only when STORAGE_BACKEND=local; harmless otherwise.
       - blobs:/data/blobs
+    deploy:
+      resources:
+        limits:
+          # Conservative defaults — tune to your host. The API is I/O-bound
+          # (DB + object store), not compute-heavy.
+          cpus: "1.0"
+          memory: 512M
 
   web:
     image: ghcr.io/dim145/subtitleextractor-web:${IMAGE_TAG:-latest}
@@ -91,7 +114,16 @@ services:
       api:
         condition: service_healthy
     ports:
+      # Intended entrypoint: kept broadly published. In production, front this
+      # with a TLS-terminating reverse proxy (see PRODUCTION NOTES at top).
       - "3000:80"
+    deploy:
+      resources:
+        limits:
+          # Conservative defaults — tune to your host. nginx serving a static
+          # SPA + proxying /api has a small footprint.
+          cpus: "0.5"
+          memory: 256M
 
 volumes:
   pgdata:

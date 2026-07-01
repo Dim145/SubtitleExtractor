@@ -2,9 +2,10 @@
 FROM golang:1.25-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
-# Copy sources and resolve deps at build time (go.sum is generated here).
+# Build against the committed go.mod/go.sum. `go build` verifies module
+# checksums against the pinned go.sum; do NOT run `go mod tidy` here — it would
+# regenerate go.sum and defeat the committed checksum pinning.
 COPY . .
-RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/api ./cmd/api
 
 FROM alpine:3.22

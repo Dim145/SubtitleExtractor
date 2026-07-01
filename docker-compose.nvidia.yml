@@ -5,6 +5,12 @@
 #   docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d --build
 #
 # Verify GPU access first:  docker run --rm --gpus all nvidia/cuda:12.4.1-base nvidia-smi
+#
+# This overlay only adds the GPU worker. The datastore/API port hardening and
+# reverse-proxy guidance live in docker-compose.yml (see its PRODUCTION NOTES);
+# they apply unchanged here. The worker is compute-heavy — we do NOT cap its
+# CPU/memory (that would throttle OCR); the GPU is granted via the reservations
+# block below. Set an explicit mem limit only if the host is memory-constrained.
 
 services:
   nvidia-worker:

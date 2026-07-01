@@ -1,0 +1,64 @@
+name: CI
+
+# Build/test gate for all three components. Runs on PRs and pushes to main.
+# The Release images workflow only builds+pushes images; this workflow is the
+# one that actually type-checks, vets and tests the code.
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Matches the toolchain in api/go.mod.
+          go-version: "1.25"
+          cache-dependency-path: api/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 to match web/Dockerfile's build stage.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # `npm run build` == `tsc --noEmit && vite build` — the type-check gate.
+      - run: npm run build
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # 3.13 stable; pyproject requires >=3.10.
+          python-version: "3.13"
+      - run: pip install -e .
+      - run: pip install pytest
+      # pytest exits 5 when it collects zero tests — treat "no tests" as pass
+      # so the job is green until the worker's starter tests land.
+      - run: python -m pytest -q || [ $? -eq 5 ]
