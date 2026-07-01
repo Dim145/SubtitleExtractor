@@ -32,7 +32,10 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       # Loopback-only: the DB must not be reachable on the public network.
-      - "127.0.0.1:5432:5432"
+      # Host port 5433 (not 5432) so it never clashes with a Postgres already
+      # running natively on the host. Containers still talk over the internal
+      # network on 5432 (see api DATABASE_URL), so this only affects host tools.
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
