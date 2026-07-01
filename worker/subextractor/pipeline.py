@@ -121,6 +121,10 @@ def resolve_config(params: dict, wcfg: dict) -> dict[str, Any]:
         # Gating + merge.
         "text_presence_threshold": float(_pick(params, wcfg, "text_presence_threshold", 0.008)),
         "change_threshold": float(_pick(params, wcfg, "change_threshold", 0.01)),
+        # Also re-OCR when text-edge density (presence) jumps by this relative
+        # amount — the bright-pixel mask alone misses a short word appearing over
+        # a busy/bright background (it barely moves the mask). Catches short cues.
+        "presence_change_threshold": float(_pick(params, wcfg, "presence_change_threshold", 0.15)),
         "min_frames": int(_pick(params, wcfg, "min_frames", 2)),
         "min_subtitle_duration": float(_pick(params, wcfg, "min_subtitle_duration", 0.4)),
         # Max gap to bridge two near-identical consecutive cues into one. A single
@@ -244,6 +248,7 @@ def extract_cues(
     best_frame = bool(cfg.get("best_frame", True))
     best_margin = float(cfg.get("best_frame_margin", 0.15))
     max_ocr_grp = int(cfg.get("max_ocr_per_group", 3))
+    pres_change_thr = float(cfg.get("presence_change_threshold", 0.15))
 
     def _ocr(crop: np.ndarray, mask: np.ndarray) -> list:
         """OCR a crop, scaling it toward the target glyph height (capped)."""
@@ -269,6 +274,7 @@ def extract_cues(
                for (zx, zy, zw, zh) in zones]
     prev_mask: list[Any] = [None for _ in zones]
     prev_lines: list[list] = [[] for _ in zones]
+    prev_pres: list[float] = [0.0 for _ in zones]  # last text-presence, for delta trigger
     grp_best: list[float] = [0.0 for _ in zones]   # best sharpness in current group
     grp_ocr: list[int] = [0 for _ in zones]         # OCR calls spent on current group
 
@@ -281,12 +287,21 @@ def extract_cues(
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
             mask = text_mask(gray)
             fg = float(np.count_nonzero(mask)) / max(1, mask.size)
+            pres = text_presence(gray)
 
-            if fg < _MIN_FG_RATIO or text_presence(gray) < presence_thr:
+            if fg < _MIN_FG_RATIO or pres < presence_thr:
                 lines = []  # no text-like content → skip OCR (avoids hallucinations)
                 grp_best[zi], grp_ocr[zi] = 0.0, 0
             else:
-                changed = prev_mask[zi] is None or mask_diff_ratio(mask, prev_mask[zi]) >= change_thr
+                # A short word appearing over a bright/busy background barely moves
+                # the bright-pixel mask, so also trigger on a relative jump in
+                # text-edge density (presence) — otherwise short cues are missed.
+                ppres = prev_pres[zi]
+                changed = (
+                    prev_mask[zi] is None
+                    or mask_diff_ratio(mask, prev_mask[zi]) >= change_thr
+                    or (ppres > 0 and abs(pres - ppres) / ppres >= pres_change_thr)
+                )
                 if changed:
                     lines = _ocr(crop, mask)
                     grp_best[zi], grp_ocr[zi] = focus_measure(gray), 1
@@ -299,7 +314,7 @@ def extract_cues(
                         grp_best[zi], grp_ocr[zi] = max(grp_best[zi], sharp), grp_ocr[zi] + 1
                     else:
                         lines = prev_lines[zi]  # text unchanged → reuse last reading
-            prev_mask[zi], prev_lines[zi] = mask, lines
+            prev_mask[zi], prev_lines[zi], prev_pres[zi] = mask, lines, pres
 
             good = [l for l in lines if l.confidence >= min_conf and l.text.strip()]
             text = _order_text(good)
