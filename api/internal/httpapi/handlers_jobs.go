@@ -25,6 +25,39 @@ const downloadTTL = time.Hour
 // optional parameter fields), stores the video, and queues an extraction job.
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
+
+	// Resolve the storage-quota state up front. The feature is optional and off by
+	// default; enforcement only happens when it's enabled AND the user has a
+	// positive effective limit (0/null = unlimited).
+	quotaEnabled := false
+	var used, limit int64
+	var unlimited = true
+	if st, err := s.settings.Get(r.Context()); err == nil && st.StorageQuotaEnabled {
+		quotaEnabled = true
+		limit, unlimited = effectiveQuotaLimit(u.StorageQuotaBytes, st.StorageQuotaDefaultBytes)
+		if !unlimited {
+			if usedBytes, err := s.jobs.StorageUsedByUser(r.Context(), u.ID); err == nil {
+				used = usedBytes
+			}
+		}
+	}
+	enforce := quotaEnabled && !unlimited
+	remaining := int64(0)
+	if enforce {
+		remaining = limit - used
+		// Already at/over quota: reject before reading the body at all.
+		if remaining <= 0 {
+			writeError(w, http.StatusRequestEntityTooLarge, quotaErrorMessage(used, limit))
+			return
+		}
+		// Fast pre-check on the declared body size. ContentLength ~= body incl.
+		// multipart overhead, so it's a conservative (over-)estimate — acceptable.
+		if r.ContentLength > 0 && used+r.ContentLength > limit {
+			writeError(w, http.StatusRequestEntityTooLarge, quotaErrorMessage(used, limit))
+			return
+		}
+	}
+
 	// Cap the whole request body (headers + all parts) so a client can't stream
 	// an unbounded upload. MaxBytesReader makes reads past the limit fail.
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes)
@@ -35,9 +68,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		inputKey string
-		filename string
-		fields   = map[string]string{}
+		inputKey  string
+		filename  string
+		inputSize int64
+		fields    = map[string]string{}
 	)
 	for {
 		part, err := mr.NextPart()
@@ -60,10 +94,26 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			// Don't trust the client Content-Type for storage; derive it from the
 			// (whitelisted) extension instead.
 			ct := videoContentType(filename)
-			if err := s.store.Put(r.Context(), inputKey, part, -1, ct); err != nil {
+
+			// Wrap the part so we know exactly how many bytes were stored
+			// (input_size_bytes) and, when quotas are enforced, so the file can't be
+			// stored beyond the remaining quota. quotaLimitReader trips when the input
+			// exceeds `remaining`, letting us reject over-quota uploads accurately.
+			var src io.Reader = part
+			cr := &countingReader{r: part}
+			if enforce {
+				cr.limit = remaining // >0 here
+			}
+			src = cr
+
+			if err := s.store.Put(r.Context(), inputKey, src, -1, ct); err != nil {
 				part.Close()
 				// Best-effort cleanup so a failed store doesn't orphan a partial blob.
 				_ = s.store.Delete(r.Context(), inputKey)
+				if cr.overQuota {
+					writeError(w, http.StatusRequestEntityTooLarge, quotaErrorMessage(used, limit))
+					return
+				}
 				if isMaxBytesError(err) {
 					writeError(w, http.StatusRequestEntityTooLarge, "upload exceeds the maximum allowed size")
 					return
@@ -71,6 +121,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "failed to store upload")
 				return
 			}
+			inputSize = cr.n
 		} else {
 			buf, _ := io.ReadAll(io.LimitReader(part, 1<<16))
 			fields[part.FormName()] = strings.TrimSpace(string(buf))
@@ -84,13 +135,38 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Worker routing is automatic — any enabled worker can claim the job.
-	job, err := s.jobs.Create(r.Context(), u.ID, "any", filename, inputKey, buildParams(fields))
+	job, err := s.jobs.Create(r.Context(), u.ID, "any", filename, inputKey, buildParams(fields), inputSize)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create job")
 		return
 	}
 	writeJSON(w, http.StatusCreated, job)
 }
+
+// countingReader counts bytes read and, when limit>0, fails once more than
+// `limit` bytes have been consumed — so a streaming upload can be aborted the
+// moment it would exceed the remaining storage quota. On that trip it sets
+// overQuota and returns an error, which surfaces through storage.Put.
+type countingReader struct {
+	r         io.Reader
+	n         int64
+	limit     int64 // 0 = no limit
+	overQuota bool
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	m, err := c.r.Read(p)
+	c.n += int64(m)
+	if c.limit > 0 && c.n > c.limit {
+		c.overQuota = true
+		return m, errQuotaExceeded
+	}
+	return m, err
+}
+
+// errQuotaExceeded is the sentinel returned by countingReader when a streaming
+// upload exceeds the remaining storage quota.
+var errQuotaExceeded = errors.New("storage quota exceeded")
 
 // buildParams turns the provided form fields into the job's params JSON.
 func buildParams(fields map[string]string) json.RawMessage {

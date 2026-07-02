@@ -86,15 +86,19 @@ func scanJob(row pgx.Row) (*Job, error) {
 	return &j, nil
 }
 
-// Create inserts a new queued job.
-func (r *Repo) Create(ctx context.Context, userID, workerClass, sourceFilename, inputKey string, params json.RawMessage) (*Job, error) {
+// Create inserts a new queued job. inputSizeBytes is the exact number of bytes
+// stored for the source video (used for storage-quota accounting).
+func (r *Repo) Create(ctx context.Context, userID, workerClass, sourceFilename, inputKey string, params json.RawMessage, inputSizeBytes int64) (*Job, error) {
 	if len(params) == 0 {
 		params = json.RawMessage(`{}`)
 	}
+	if inputSizeBytes < 0 {
+		inputSizeBytes = 0
+	}
 	return scanJob(r.pool.QueryRow(ctx, `
-		INSERT INTO jobs (user_id, worker_class, source_filename, input_key, params)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING `+jobColumns, userID, workerClass, sourceFilename, inputKey, params))
+		INSERT INTO jobs (user_id, worker_class, source_filename, input_key, params, input_size_bytes)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING `+jobColumns, userID, workerClass, sourceFilename, inputKey, params, inputSizeBytes))
 }
 
 // Get fetches a job by id.
@@ -455,6 +459,53 @@ func (r *Repo) StorageKeysForUser(ctx context.Context, userID string) ([]string,
 		if k != "" {
 			out = append(out, k)
 		}
+	}
+	return out, rows.Err()
+}
+
+// StorageUsedByUser returns a user's currently-stored bytes: non-deleted source
+// videos (jobs.input_size_bytes where video_deleted_at IS NULL) plus generated
+// result files (job_results.byte_size). Deleting a video frees quota, so this
+// reflects current storage, not lifetime. One query, no N+1.
+func (r *Repo) StorageUsedByUser(ctx context.Context, userID string) (int64, error) {
+	var used int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE((SELECT SUM(input_size_bytes) FROM jobs
+			          WHERE user_id=$1 AND video_deleted_at IS NULL), 0)
+		  + COALESCE((SELECT SUM(res.byte_size) FROM job_results res
+			          JOIN jobs j ON j.id = res.job_id
+			          WHERE j.user_id=$1), 0)`, userID).Scan(&used)
+	return used, err
+}
+
+// StorageUsedByUsers returns currently-stored bytes for every user, keyed by
+// user id, in a single grouped query (for admin visibility; avoids N+1). Users
+// with no stored bytes are absent from the map (treat as 0).
+func (r *Repo) StorageUsedByUsers(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT user_id, SUM(bytes) FROM (
+			SELECT user_id, COALESCE(SUM(input_size_bytes), 0) AS bytes
+			FROM jobs WHERE video_deleted_at IS NULL
+			GROUP BY user_id
+			UNION ALL
+			SELECT j.user_id, COALESCE(SUM(res.byte_size), 0) AS bytes
+			FROM job_results res JOIN jobs j ON j.id = res.job_id
+			GROUP BY j.user_id
+		) t
+		GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var uid string
+		var bytes int64
+		if err := rows.Scan(&uid, &bytes); err != nil {
+			return nil, err
+		}
+		out[uid] = bytes
 	}
 	return out, rows.Err()
 }

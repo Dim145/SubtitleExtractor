@@ -26,6 +26,9 @@ type User struct {
 	IsAdmin      bool      `json:"isAdmin"`
 	TokenVersion int       `json:"-"`
 	CreatedAt    time.Time `json:"createdAt"`
+	// StorageQuotaBytes is the per-user override; NULL (nil) = inherit the admin
+	// default. A non-nil 0 means unlimited for this user specifically.
+	StorageQuotaBytes *int64 `json:"storageQuotaBytes"`
 }
 
 // Repo is the user data-access layer.
@@ -38,13 +41,13 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-const selectColumns = `id, email, display_name, provider, password_hash, oidc_issuer, oidc_subject, is_admin, token_version, created_at`
+const selectColumns = `id, email, display_name, provider, password_hash, oidc_issuer, oidc_subject, is_admin, token_version, created_at, storage_quota_bytes`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
 	var displayName *string
 	err := row.Scan(&u.ID, &u.Email, &displayName, &u.Provider, &u.PasswordHash,
-		&u.OIDCIssuer, &u.OIDCSubject, &u.IsAdmin, &u.TokenVersion, &u.CreatedAt)
+		&u.OIDCIssuer, &u.OIDCSubject, &u.IsAdmin, &u.TokenVersion, &u.CreatedAt, &u.StorageQuotaBytes)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -130,6 +133,14 @@ func (r *Repo) SetPassword(ctx context.Context, id, passwordHash string) error {
 // SetAdmin grants or revokes admin on a user.
 func (r *Repo) SetAdmin(ctx context.Context, id string, isAdmin bool) error {
 	_, err := r.pool.Exec(ctx, `UPDATE users SET is_admin=$2 WHERE id=$1`, id, isAdmin)
+	return err
+}
+
+// SetStorageQuota sets (or, with nil, clears) a user's per-user storage-quota
+// override. A nil quota makes the user inherit the admin default; a non-nil 0
+// means unlimited for this user specifically.
+func (r *Repo) SetStorageQuota(ctx context.Context, id string, quota *int64) error {
+	_, err := r.pool.Exec(ctx, `UPDATE users SET storage_quota_bytes=$2 WHERE id=$1`, id, quota)
 	return err
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"subtitleextractor/internal/auth"
 	"subtitleextractor/internal/storage"
+	"subtitleextractor/internal/users"
 )
 
 // --- health --------------------------------------------------------------
@@ -166,7 +167,34 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, s.userWithStorage(r, u))
+}
+
+// userWithStorage decorates a user with a "storage" object describing quota
+// state: whether quotas are enabled, the user's currently-used bytes, and their
+// effective limit (limitBytes is null when unlimited — no per-user override and
+// no positive default). Failures degrade gracefully (quotas reported disabled).
+func (s *Server) userWithStorage(r *http.Request, u *users.User) any {
+	type storageInfo struct {
+		QuotaEnabled bool   `json:"quotaEnabled"`
+		UsedBytes    int64  `json:"usedBytes"`
+		LimitBytes   *int64 `json:"limitBytes"`
+	}
+	info := storageInfo{}
+	if st, err := s.settings.Get(r.Context()); err == nil {
+		info.QuotaEnabled = st.StorageQuotaEnabled
+		if used, err := s.jobs.StorageUsedByUser(r.Context(), u.ID); err == nil {
+			info.UsedBytes = used
+		}
+		if limit, unlimited := effectiveQuotaLimit(u.StorageQuotaBytes, st.StorageQuotaDefaultBytes); !unlimited {
+			l := limit
+			info.LimitBytes = &l
+		}
+	}
+	return struct {
+		*users.User
+		Storage storageInfo `json:"storage"`
+	}{User: u, Storage: info}
 }
 
 // handleUpdateProfile lets a local user edit their own display name, email and

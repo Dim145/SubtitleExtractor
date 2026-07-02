@@ -12,6 +12,7 @@ import (
 	"subtitleextractor/internal/cleanup"
 	"subtitleextractor/internal/cronspec"
 	"subtitleextractor/internal/settings"
+	"subtitleextractor/internal/users"
 )
 
 // handleAdminCreateUser lets an admin provision a local account (allowed when
@@ -61,12 +62,27 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	// Decorate each user with their currently-used storage (admin visibility). A
+	// single grouped query keeps this O(1), not N+1; a failure degrades to 0.
+	usage, _ := s.jobs.StorageUsedByUsers(r.Context())
+	type userDTO struct {
+		*users.User
+		StorageUsedBytes int64 `json:"storageUsedBytes"`
+	}
+	out := make([]userDTO, 0, len(list))
+	for _, u := range list {
+		out = append(out, userDTO{User: u, StorageUsedBytes: usage[u.ID]})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleAdminPatchUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IsAdmin *bool `json:"isAdmin"`
+		// StorageQuotaBytes uses RawMessage so we can distinguish an absent field
+		// (leave the override untouched) from an explicit null (clear the override →
+		// inherit the admin default) from a number (set it; 0 = unlimited).
+		StorageQuotaBytes json.RawMessage `json:"storageQuotaBytes"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -90,6 +106,26 @@ func (s *Server) handleAdminPatchUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.recordAudit(r, "user.setAdmin", id, map[string]any{"isAdmin": *body.IsAdmin})
+	}
+	if len(body.StorageQuotaBytes) > 0 {
+		var quota *int64
+		if string(body.StorageQuotaBytes) != "null" {
+			var v int64
+			if err := json.Unmarshal(body.StorageQuotaBytes, &v); err != nil {
+				writeError(w, http.StatusBadRequest, "storageQuotaBytes must be a number or null")
+				return
+			}
+			if v < 0 {
+				writeError(w, http.StatusBadRequest, "storageQuotaBytes must be zero or positive")
+				return
+			}
+			quota = &v
+		}
+		if err := s.users.SetStorageQuota(r.Context(), id, quota); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update storage quota")
+			return
+		}
+		s.recordAudit(r, "user.setStorageQuota", id, map[string]any{"storageQuotaBytes": quota})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
