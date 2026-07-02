@@ -21,6 +21,9 @@ OCR pipeline → downloadable SRT/ASS. The control plane (M1–M3) is verified e
 | M7 | Client-side (browser) extraction | ✅ built (WebCodecs + onnxruntime-web/WebGPU, code-split) |
 | — | Admin (users, settings, workers) + DB-backed dynamic worker config | ✅ done |
 | — | 2-zone subtitle-area selector (WebCodecs, browser-only) | ✅ done³ |
+| — | Optional per-user **storage quotas** (admin toggle · default · per-user override) | ✅ done |
+| — | OCR quality pass: DBNet det-gate, auto-zone, deterministic French normalizer, in-browser OCR parity | ✅ done |
+| — | Security & ops hardening: session revocation, CSRF, upload limits, `/readyz`, `/metrics`, per-worker enrollment tokens, CI test gate | ✅ done |
 
 ¹ The Go control plane + claim protocol are tested end-to-end. The worker's OCR
 pipeline compiles and is wired; running it on real video needs `ffmpeg` + the
@@ -29,8 +32,8 @@ Python deps on the host (`brew install ffmpeg`, then `./worker/run-macos.sh`).
 ² React + Vite frontend in `web/` — "Cutting Room" dark pro-tool theme (amber/cyan,
 Archivo/Geist/JetBrains Mono). Login (local + OIDC), dashboard (upload + live job
 list), job detail (progress/logs/downloads), and the subtitle **editor** (video
-preview with live ASS overlay via JASSUB/libass-wasm, editable cue table synced to
-playback, `\an` alignment, SRT/ASS export) — all verified against the running API.
+preview with a live subtitle overlay, editable cue table synced to playback,
+`\an` alignment, SRT/ASS export) — all verified against the running API.
 The waveform timeline (wavesurfer) + save-to-server are part of the editor. Dev:
 `cd web && npm install && npm run dev` (proxies `/api` to `localhost:8080`).
 
@@ -76,7 +79,9 @@ docker compose up --build
 ```text
 # App (frontend):  http://localhost:3000   (nginx serves the SPA + proxies /api)
 # API:             http://localhost:8080
-# health check:    http://localhost:8080/healthz
+# liveness:        http://localhost:8080/healthz
+# readiness:       http://localhost:8080/readyz    (checks DB + object store)
+# metrics:         http://localhost:8080/metrics   (Prometheus; needs INTERNAL_API_TOKEN)
 # MinIO console:   http://localhost:9001
 ```
 
@@ -118,12 +123,39 @@ docker compose exec -T minio sh -c \
 To restore: recreate the volumes, `psql < backup.sql`, and `mc mirror` the
 saved bucket contents back into `local/<bucket>`.
 
+## Storage quotas (optional)
+
+Off by default. In **Admin › Settings**, enable "Storage quotas" and set a
+default per-user limit; override it per user in **Admin › Users** (empty =
+inherit the default, `0` = unlimited). Usage counts a user's currently-stored
+source videos + generated subtitle files, so deleting a video frees space. An
+upload that would exceed the quota is rejected with an explicit message, and
+each user sees their used/total on the dashboard. Only admins change quotas.
+
+## Security & operations
+
+- **Sessions** are revocable: logout and password changes invalidate existing
+  session tokens (per-user token version).
+- **CSRF:** state-changing requests are checked same-origin (Origin/Referer vs
+  the request host, or a configured `API_PUBLIC_URL` / `API_CORS_ORIGINS`). If
+  you front the app with your own reverse proxy, it **must forward the original
+  `Host` header including the port** (the shipped nginx uses `proxy_set_header
+  Host $http_host`) — otherwise authenticated writes are rejected as cross-origin.
+- **Workers** use per-worker tokens: `INTERNAL_API_TOKEN` is only an enrollment
+  secret — each worker exchanges it for its own token on startup (stateless,
+  nothing to persist worker-side), and the bootstrap token alone cannot claim
+  jobs or read source videos.
+- **Uploads** are capped by `MAX_UPLOAD_BYTES` (default 2 GiB) and, when enabled,
+  by per-user storage quotas.
+- **Observability:** JSON access logs with request IDs, `/readyz` (DB + storage
+  probe), and Prometheus `/metrics` (job/queue/worker gauges).
+
 ## Tech stack
 
-- **API:** Go, chi, pgx, Postgres-backed queue (`FOR UPDATE SKIP LOCKED`), coreos/go-oidc, argon2id, minio-go
+- **API:** Go, chi, pgx, Postgres-backed queue (`FOR UPDATE SKIP LOCKED`), coreos/go-oidc, argon2id, minio-go, prometheus/client_golang
 - **DB:** PostgreSQL 16
-- **Worker:** Python — ffmpeg + RapidOCR / PP-OCRv5 / PaddleOCR-VL (configurable)
-- **Frontend:** React + Vite + TypeScript; ass-compiler, JASSUB, wavesurfer.js
+- **Worker:** Python — ffmpeg + RapidOCR / PP-OCRv5 / PaddleOCR-VL (configurable), deterministic French text normalizer
+- **Frontend:** React + Vite + TypeScript; ass-compiler, wavesurfer.js
 
 ## License
 
