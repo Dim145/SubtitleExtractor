@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Trash2, Plus, X, ChevronDown, Check, Play, ChevronRight, CircleCheck, TriangleAlert, CircleX, Film } from "lucide-react";
 import {
@@ -13,7 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { useDialog } from "@/components/ui/useDialog";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/toast";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, bytesFromValueUnit, valueUnitFromBytes } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 const TABS = [
@@ -34,6 +34,61 @@ function parseDecimal(raw: string): number | null {
   if (v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** A byte-quota input: a whole-ish number field + a Mo/Go unit selector. Owns its
+ * own value/unit string state (seeded from `bytes`) so typing never re-derives the
+ * unit mid-edit; emits bytes via onChange (null when blank = unlimited/default).
+ * `placeholder` labels the blank state (« Illimité » or « Défaut »). */
+function QuotaInput({
+  bytes, onChange, onCommit, disabled, placeholder, ariaLabel,
+}: {
+  bytes: number | null;
+  // Fired on every edit — use for local form state.
+  onChange?: (bytes: number | null) => void;
+  // Fired on blur / unit change — use when each save is a network call (per-row).
+  onCommit?: (bytes: number | null) => void;
+  disabled?: boolean;
+  placeholder: string;
+  ariaLabel: string;
+}) {
+  const [state, setState] = useState(() => valueUnitFromBytes(bytes));
+  // Re-seed when the incoming bytes change identity (e.g. settings loaded, or a
+  // different user row) but not on every render.
+  const seedRef = useRef(bytes);
+  useEffect(() => {
+    if (seedRef.current !== bytes) {
+      seedRef.current = bytes;
+      setState(valueUnitFromBytes(bytes));
+    }
+  }, [bytes]);
+
+  const setBoth = (value: string, unit: "Mo" | "Go") => {
+    setState({ value, unit });
+    onChange?.(bytesFromValueUnit(value, unit));
+    return bytesFromValueUnit(value, unit);
+  };
+
+  return (
+    <div className="flex gap-2">
+      <input
+        className={cn(input, "flex-1 tabular-nums")} type="number" inputMode="decimal"
+        min={0} step={1} disabled={disabled} placeholder={placeholder} aria-label={ariaLabel}
+        value={state.value}
+        onChange={(e) => setBoth(e.target.value, state.unit)}
+        onBlur={() => onCommit?.(bytesFromValueUnit(state.value, state.unit))}
+      />
+      <select
+        className={cn(input, "w-20 shrink-0")} disabled={disabled}
+        aria-label={`${ariaLabel} — unité`}
+        value={state.unit}
+        onChange={(e) => { const b = setBoth(state.value, e.target.value as "Mo" | "Go"); onCommit?.(b); }}
+      >
+        <option value="Mo">Mo</option>
+        <option value="Go">Go</option>
+      </select>
+    </div>
+  );
 }
 
 export function Admin() {
@@ -266,8 +321,32 @@ function Users() {
       {confirmDialog}
       <div className="overflow-hidden rounded-xl border border-border">
         {users.data?.map((u, i) => (
-          <div key={u.id} className={cn("flex items-center gap-3 bg-surface px-4 py-3", i > 0 && "border-t border-border")}>
-            <div className="flex-1"><div className="font-medium">{u.displayName || u.email}</div><div className="font-mono text-xs text-faint">{u.email} · {u.provider}</div></div>
+          <div key={u.id} className={cn("flex flex-wrap items-center gap-x-3 gap-y-2 bg-surface px-4 py-3", i > 0 && "border-t border-border")}>
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium">{u.displayName || u.email}</div>
+              <div className="truncate font-mono text-xs text-faint">
+                {u.email} · {u.provider}
+                <span className="tabular-nums"> · {formatBytes(u.storageUsedBytes)} utilisés</span>
+              </div>
+            </div>
+            <label className="flex items-center gap-1.5 text-xs text-muted">
+              <span className="shrink-0">Quota</span>
+              <div className="w-40">
+                <QuotaInput
+                  bytes={u.storageQuotaBytes}
+                  placeholder="Défaut"
+                  ariaLabel={`Quota de stockage — ${u.email}`}
+                  onCommit={(b) => {
+                    // Skip a no-op commit (blur without an actual change).
+                    if (b === (u.storageQuotaBytes ?? null)) return;
+                    patch.mutate({ id: u.id, storageQuotaBytes: b }, {
+                      onSuccess: () => toast.success("Quota mis à jour."),
+                      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Save failed"),
+                    });
+                  }}
+                />
+              </div>
+            </label>
             <span className="flex items-center gap-2 text-xs text-muted"><Switch checked={u.isAdmin} onCheckedChange={(v) => patch.mutate({ id: u.id, isAdmin: v })} aria-label={`Admin — ${u.email}`} /> admin</span>
             <Button variant="ghost" size="icon" className="hover:text-err" aria-label={`Delete user ${u.email}`} onClick={() => removeUser(u)}><Trash2 className="size-4" /></Button>
           </div>
@@ -290,6 +369,7 @@ function Users() {
 function Settings() {
   const settings = useAdminSettings();
   const save = useSaveSettings();
+  const toast = useToast();
   const [form, setForm] = useState<SiteSettings | null>(null);
   const [saved, setSaved] = useState(false);
   useEffect(() => { if (settings.data) setForm(settings.data); }, [settings.data]);
@@ -298,7 +378,10 @@ function Settings() {
   return (
     <div className="grid max-w-lg gap-4">
     <form className="grid gap-4 rounded-xl border border-border bg-surface p-5"
-      onSubmit={(e) => { e.preventDefault(); save.mutate(form, { onSuccess: () => setSaved(true) }); }}>
+      onSubmit={(e) => { e.preventDefault(); save.mutate(form, {
+        onSuccess: () => { setSaved(true); toast.success("Paramètres enregistrés."); },
+        onError: (err: unknown) => toast.error(err instanceof Error ? err.message : "Save failed"),
+      }); }}>
       <span className="flex items-center gap-2.5 text-sm"><Switch checked={form.registrationEnabled} onCheckedChange={(v) => upd({ registrationEnabled: v })} aria-label="Allow self-registration" /> Allow self-registration</span>
       <label className="grid gap-1"><span className="text-xs font-medium text-muted">Default OCR backend</span>
         <select className={input} value={form.defaultOcrBackend} onChange={(e) => upd({ defaultOcrBackend: e.target.value })}>
@@ -321,6 +404,23 @@ function Settings() {
           <input className={cn(input, "font-mono")} disabled={!form.videoCleanupEnabled} placeholder="0 3 * * *"
             value={form.videoCleanupCron} onChange={(e) => upd({ videoCleanupCron: e.target.value })} />
           <span className="text-[11px] text-faint">5-field cron · default <span className="font-mono">0 3 * * *</span> (daily at 03:00)</span></label>
+      </div>
+
+      <div className="mt-1 border-t border-border pt-4">
+        <div className={eyebrow}>Quotas de stockage</div>
+        <p className="mt-1 text-xs text-muted">Limitez l'espace total qu'un utilisateur peut consommer. Un dépassement bloque les nouveaux imports.</p>
+      </div>
+      <span className="flex items-center gap-2.5 text-sm"><Switch checked={form.storageQuotaEnabled} onCheckedChange={(v) => upd({ storageQuotaEnabled: v })} aria-label="Activer les quotas de stockage" /> Activer les quotas de stockage</span>
+      <div className={cn("grid gap-1", !form.storageQuotaEnabled && "opacity-50")}>
+        <span className="text-xs font-medium text-muted" id="quota-default-label">Quota par défaut</span>
+        <QuotaInput
+          bytes={form.storageQuotaDefaultBytes || null}
+          disabled={!form.storageQuotaEnabled}
+          placeholder="Illimité"
+          ariaLabel="Quota de stockage par défaut"
+          onChange={(b) => upd({ storageQuotaDefaultBytes: b ?? 0 })}
+        />
+        <span className="text-[11px] text-faint">Appliqué à chaque utilisateur sans quota personnalisé. Vide ou 0 = illimité.</span>
       </div>
 
       <div className="flex items-center gap-3">

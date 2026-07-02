@@ -2,10 +2,12 @@ import { lazy, Suspense, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { UploadCloud, Plus, TriangleAlert, ChevronRight, Trash2, X, Pencil, Film } from "lucide-react";
 import { useJobs, useWorkerAvailability, useCancelJob, useDeleteJob } from "@/api/jobs";
+import { useMe } from "@/api/auth";
 import type { Job } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge, ProgressBar } from "@/components/StatusBadge";
+import { StorageQuota } from "@/components/StorageQuota";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { useToast } from "@/components/ui/toast";
@@ -19,6 +21,7 @@ const ACTIVE: Job["status"][] = ["queued", "claimed", "running"];
 export function Dashboard() {
   const jobs = useJobs();
   const avail = useWorkerAvailability();
+  const me = useMe();
   const fileRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
   const [pickerFile, setPickerFile] = useState<File | null>(null);
@@ -70,6 +73,8 @@ export function Dashboard() {
           className="mt-3 rounded-lg border border-border-strong bg-surface-2 px-3 py-1.5 text-sm font-medium transition-colors hover:border-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >Browse for a file</button>
       </div>
+
+      {me.data?.storage && <StorageQuota storage={me.data.storage} />}
 
       {jobs.isLoading ? (
         <div className="overflow-hidden rounded-xl border border-border">

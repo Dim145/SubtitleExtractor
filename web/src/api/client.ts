@@ -1,5 +1,5 @@
 import type {
-  AuthConfig, CleanupRun, Job, JobResult, LogEntry, SiteSettings, User, Worker,
+  AdminUser, AuthConfig, CleanupRun, Job, JobResult, LogEntry, SiteSettings, User, Worker,
 } from "./types";
 
 export class APIError extends Error {
@@ -80,10 +80,10 @@ export const api = {
 
   // ---- admin ----
   admin: {
-    users: () => request<User[]>("/api/admin/users"),
+    users: () => request<AdminUser[]>("/api/admin/users"),
     createUser: (u: { email: string; password: string; displayName?: string; isAdmin?: boolean }) =>
       request<User>("/api/admin/users", jsonReq("POST", u)),
-    patchUser: (id: string, patch: { isAdmin?: boolean }) =>
+    patchUser: (id: string, patch: { isAdmin?: boolean; storageQuotaBytes?: number | null }) =>
       request<void>(`/api/admin/users/${id}`, jsonReq("PATCH", patch)),
     deleteUser: (id: string) => request<void>(`/api/admin/users/${id}`, { method: "DELETE" }),
 

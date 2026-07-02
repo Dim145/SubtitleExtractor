@@ -15,8 +15,19 @@ export function useCreateUser() {
 export function usePatchUser() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: string; isAdmin: boolean }) => api.admin.patchUser(v.id, { isAdmin: v.isAdmin }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }),
+    // Forwards only the provided fields (isAdmin and/or storageQuotaBytes; null
+    // clears an override back to the default). Refreshes both the admin list and
+    // /me so the current user's own quota widget updates after an admin change.
+    mutationFn: (v: { id: string; isAdmin?: boolean; storageQuotaBytes?: number | null }) => {
+      const patch: { isAdmin?: boolean; storageQuotaBytes?: number | null } = {};
+      if (v.isAdmin !== undefined) patch.isAdmin = v.isAdmin;
+      if (v.storageQuotaBytes !== undefined) patch.storageQuotaBytes = v.storageQuotaBytes;
+      return api.admin.patchUser(v.id, patch);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+      qc.invalidateQueries({ queryKey: ["me"] });
+    },
   });
 }
 export function useDeleteUser() {

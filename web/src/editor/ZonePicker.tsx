@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { useDialog } from "@/components/ui/useDialog";
+import { useToast } from "@/components/ui/toast";
 import { subtitleFilename } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { loadZones, saveZones, loadLang, saveLang, loadAutoZone, saveAutoZone } from "@/lib/zonePrefs";
@@ -50,6 +51,7 @@ function download(name: string, content: string) {
 export function ZonePicker({ file, onClose }: { file: File; onClose: () => void }) {
   const navigate = useNavigate();
   const create = useCreateJob();
+  const toast = useToast();
   const stageRef = useRef<HTMLDivElement>(null);
   const dlg = useDialog<HTMLDivElement>(onClose);
 
@@ -92,7 +94,12 @@ export function ZonePicker({ file, onClose }: { file: File; onClose: () => void 
     } else if (zones.length) {
       form.append("zones", JSON.stringify(zones));
     }
-    create.mutate(form, { onSuccess: () => { onClose(); navigate({ to: "/" }); } });
+    create.mutate(form, {
+      onSuccess: () => { onClose(); navigate({ to: "/" }); },
+      // Surface the server's error message (e.g. an over-quota HTTP 413 whose
+      // JSON `error` was extracted into APIError.message) so the user sees why.
+      onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Extraction failed"),
+    });
   }
 
   // ---- in-browser extraction ----

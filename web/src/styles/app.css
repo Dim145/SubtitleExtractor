@@ -69,6 +69,9 @@
 }
 .player-seek::-moz-range-track { background: transparent; }
 
+/* Storage-quota meter fill: animate width changes, but honor reduced-motion. */
+.storage-fill { transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease; }
+
 /* One orchestrated entrance: sections/rows fade up, staggered via inline delay. */
 @keyframes fade-up {
   from { opacity: 0; transform: translateY(8px); }
@@ -82,5 +85,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .animate-in, .route-fade { animation: none; }
+  .storage-fill { transition: none; }
   * { scroll-behavior: auto !important; }
 }

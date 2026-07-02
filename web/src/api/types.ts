@@ -1,3 +1,12 @@
+// Per-user storage usage/quota, returned on /api/auth/me. `limitBytes` null OR 0
+// means unlimited; the widget is hidden unless quotas are enabled AND a finite
+// positive limit is set.
+export interface StorageInfo {
+  quotaEnabled: boolean;
+  usedBytes: number;
+  limitBytes: number | null;
+}
+
 export interface User {
   id: string;
   email: string;
@@ -5,6 +14,7 @@ export interface User {
   provider: "local" | "oidc";
   isAdmin: boolean;
   createdAt: string;
+  storage?: StorageInfo;
 }
 
 export interface AuthConfig {
@@ -92,6 +102,17 @@ export interface SiteSettings {
   videoCleanupEnabled: boolean;
   videoRetentionDays: number;
   videoCleanupCron: string;
+  // Storage quotas. When enabled, each user's total stored bytes is capped at
+  // their override (AdminUser.storageQuotaBytes) or this default. 0 = unlimited.
+  storageQuotaEnabled: boolean;
+  storageQuotaDefaultBytes: number;
+}
+
+// A user as returned by the admin users list — extends the public User with the
+// admin-only quota override and the user's current usage.
+export interface AdminUser extends User {
+  storageQuotaBytes: number | null; // override; null = inherit default
+  storageUsedBytes: number;
 }
 
 export interface CleanupFile {
